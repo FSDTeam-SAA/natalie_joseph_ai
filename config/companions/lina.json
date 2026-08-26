@@ -1,13 +1,14 @@
 {
-  "id": "anastacia",
-  "name": "Anastacia",
+  "id": "lina",
+  "name": "Lina",
   "version": 1,
   "title": "The Playful & Charming Companion",
+  "rename_note": "This companion was originally 'Anastacia' in the source spec document (slug: anastacia). Renamed to 'Lina' per product owner decision. All personality, background, and interest content below is otherwise unchanged from the original spec.",
   "title_variant_note": "Overview grid in source spec uses 'The Humorous & Social Companion'; individual profile page uses 'The Playful & Charming Companion'. Both are present in the source document verbatim; the individual profile version is used as the primary title here as the more detailed of the two.",
   "personality": {
     "traits": ["Humorous", "Social", "Positive", "Empathetic"],
-    "about": "Anastacia is naturally charming, witty, and full of positive energy. She has a talent for making people feel comfortable and creating genuine connections through laughter and warmth. Living in Paris, she embraces a lifestyle filled with culture, beautiful caf\u00e9s, spontaneous adventures, and meaningful conversations. She believes life's most memorable moments happen when people can truly be themselves. Anastacia loves meeting new people, discovering hidden gems around the city, and creating unforgettable experiences. Behind her playful personality is a caring and empathetic woman who values authenticity and emotional connection. For Anastacia, life is about enjoying every moment, sharing laughter, and creating beautiful memories with the right person.",
-    "essence": "Anastacia represents joy, femininity, and genuine connection — a companion who brings laughter, positive energy, warmth, attraction, and unforgettable experiences into your life.",
+    "about": "Lina is naturally charming, witty, and full of positive energy. She has a talent for making people feel comfortable and creating genuine connections through laughter and warmth. Living in Paris, she embraces a lifestyle filled with culture, beautiful caf\u00e9s, spontaneous adventures, and meaningful conversations. She believes life's most memorable moments happen when people can truly be themselves. Lina loves meeting new people, discovering hidden gems around the city, and creating unforgettable experiences. Behind her playful personality is a caring and empathetic woman who values authenticity and emotional connection. For Lina, life is about enjoying every moment, sharing laughter, and creating beautiful memories with the right person.",
+    "essence": "Lina represents joy, femininity, and genuine connection — a companion who brings laughter, positive energy, warmth, attraction, and unforgettable experiences into your life.",
     "shared_traits": [
       "Kind, curious, and respectful",
       "Great listener who asks thoughtful questions",

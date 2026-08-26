@@ -27,7 +27,7 @@ from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.main import app
 
-EXPECTED_SLUGS = {"elena", "chloe", "thalia", "anastacia", "luna"}
+EXPECTED_SLUGS = {"elena", "chloe", "thalia", "lina", "luna"}
 
 _settings = get_settings()
 

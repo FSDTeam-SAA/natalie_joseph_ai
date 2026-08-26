@@ -28,7 +28,10 @@ from app.repositories.companion_repository import CompanionRepository
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "companions"
 
 # Per spec Section 2: the five companion IDs must be stable.
-EXPECTED_SLUGS = {"elena", "chloe", "thalia", "anastacia", "luna"}
+# NOTE: "anastacia" was renamed to "lina" per product owner decision
+# after initial spec delivery — the stable set below reflects that
+# rename, not the original spec document's literal wording.
+EXPECTED_SLUGS = {"elena", "chloe", "thalia", "lina", "luna"}
 
 
 def _load_companion_json(path: Path) -> dict:
