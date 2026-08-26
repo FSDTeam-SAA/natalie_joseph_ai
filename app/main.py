@@ -16,7 +16,7 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api import health
+from app.api import companions, health
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.core.logging import configure_logging
@@ -79,9 +79,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 app.include_router(health.router)
+app.include_router(companions.router, prefix=settings.API_V1_PREFIX)
 
 # Business routers — registered here as they're delivered in later phases:
-# app.include_router(companions.router, prefix=settings.API_V1_PREFIX, tags=["Companions"])   # Phase 3
 # app.include_router(conversations.router, prefix=settings.API_V1_PREFIX, tags=["Conversations"])  # Phase 5
 # app.include_router(chat.router, prefix=settings.API_V1_PREFIX, tags=["Chat"])                # Phase 5/10
 # app.include_router(memories.router, prefix=settings.API_V1_PREFIX, tags=["Memories"])        # Phase 7
