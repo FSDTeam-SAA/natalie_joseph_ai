@@ -122,54 +122,74 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Auth
     # Confirmed by product owner (2026-08-24): AUTH_MODE = jwt.
-    # user_id / conversation_id / companion_id are UUIDs.
-    # adult_eligible is delivered via JWT claim.
+    # user_id / conversation_id / companion_id are UUIDs (our own
+    # service's IDs — see external_user_id ID-format caveat below).
     #
-    # TODO-CONFIRM before Phase 5/9 implementation (still needed from
-    # backend team — not guessed):
-    #   - JWT signing algorithm (HS256 shared secret vs RS256/ES256
-    #     public key)
-    #   - JWT_PUBLIC_KEY or JWT_SECRET value/source (e.g. JWKS URL vs
-    #     static key)
-    #   - Expected `iss` (issuer) and `aud` (audience) claim values
-    #   - Exact claim name carrying the internal user UUID
-    #     (e.g. "sub" vs "user_id")
-    #   - Exact claim name carrying the adult-eligibility flag
-    #     (e.g. "adult_eligible" vs "entitlements.adult")
-    #   - Exact claim name carrying the entitlement/subscription flag
-    #   - Token transport: `Authorization: Bearer <jwt>` assumed but
-    #     not yet confirmed
+    # Confirmed by backend team (2026-08-29), from their actual NestJS
+    # login service source code:
+    #   - Algorithm: HS256 (implied — jwtService.sign() called with a
+    #     plain secret string and no `algorithm` option, which defaults
+    #     to HS256 in the underlying `jsonwebtoken` library)
+    #   - User ID claim name: "id" (from the signed payload
+    #     `{ id: user.id, role: user.role, email: user.email }`)
+    #   - No `iss` or `aud` claims are set anywhere in their sign()
+    #     call — so this service does not verify against issuer/
+    #     audience values, since none exist to check
+    #   - Access token secret comes from their ACCESS_TOKEN_SECRET env
+    #     var — the actual value must be shared securely (not pasted in
+    #     plaintext chat/email) and set as JWT_SECRET below
     #
-    # Until confirmed, `security.py` implements NO verification logic —
-    # only the interface — per Section 66 ("do not fabricate
-    # functionality").
+    # STILL OPEN — not yet confirmed, not guessed (see security.py
+    # JWTAuthProvider for how each is handled in the meantime):
+    #   - adult_eligible claim: ABSENT from their current token payload
+    #     entirely. Per spec Section 28, this service fails closed —
+    #     every user is treated as NOT adult-eligible until the backend
+    #     team adds this claim.
+    #   - entitled claim: ABSENT from their current token payload too.
+    #     Defaults to False (not entitled) until added.
+    #   - Exact type/format of `user.id` (their Prisma schema) — is it
+    #     a UUID string, a Prisma cuid, or an autoincrement integer?
+    #     This service's `users.external_user_id` column is typed as
+    #     UUID; if their `id` is not a real UUID, that column type will
+    #     need to change to a plain string instead.
+    #   - Confirm the frontend sends this access token to this service
+    #     as `Authorization: Bearer <token>` (near-certain, but not
+    #     explicitly confirmed).
     # ------------------------------------------------------------------
     AUTH_MODE: AuthMode = AuthMode.jwt
     JWT_ALGORITHM: str = Field(
-        default="RS256",
-        description="TODO-CONFIRM with backend team before Phase 5.",
+        default="HS256",
+        description="Confirmed via backend team's NestJS source (2026-08-29).",
     )
     JWT_PUBLIC_KEY: str = Field(
         default="",
-        description="TODO-CONFIRM: PEM public key or JWKS URL from backend team.",
+        description="Not used — backend uses a symmetric HS256 secret, not a key pair.",
     )
     JWT_SECRET: str = Field(
         default="",
-        description="Only used if JWT_ALGORITHM is HS*. TODO-CONFIRM.",
+        description="Set this to the backend team's actual ACCESS_TOKEN_SECRET value.",
     )
-    JWT_ISSUER: str = Field(default="", description="TODO-CONFIRM.")
-    JWT_AUDIENCE: str = Field(default="", description="TODO-CONFIRM.")
+    JWT_ISSUER: str = Field(
+        default="",
+        description="Confirmed unused — backend does not set an iss claim. Leave blank.",
+    )
+    JWT_AUDIENCE: str = Field(
+        default="",
+        description="Confirmed unused — backend does not set an aud claim. Leave blank.",
+    )
     JWT_USER_ID_CLAIM: str = Field(
-        default="sub",
-        description="TODO-CONFIRM exact claim name with backend team.",
+        default="id",
+        description="Confirmed via backend team's NestJS source (2026-08-29).",
     )
     JWT_ADULT_ELIGIBLE_CLAIM: str = Field(
         default="adult_eligible",
-        description="TODO-CONFIRM exact claim name with backend team.",
+        description="TODO-CONFIRM: claim does not exist yet in backend's tokens. "
+        "Fails closed (treated as False) until backend adds it.",
     )
     JWT_ENTITLED_CLAIM: str = Field(
         default="entitled",
-        description="TODO-CONFIRM exact claim name with backend team.",
+        description="TODO-CONFIRM: claim does not exist yet in backend's tokens. "
+        "Defaults to False until backend adds it.",
     )
 
     # Local dev / internal service fallback modes (still supported per

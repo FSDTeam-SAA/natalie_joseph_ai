@@ -2,41 +2,49 @@
 Authentication abstraction.
 
 STATUS:
-  - JWT verification (production): STILL AN INTERFACE ONLY, pending
-    backend team confirmation — see TODO-CONFIRM list below and in
-    app/core/config.py.
-  - Local API key mode (dev/testing only): IMPLEMENTED in this file
-    (LocalAPIKeyAuthProvider) as a temporary stand-in so Phase 5+ can
-    be built and tested end-to-end before JWT details arrive. See the
-    "SWITCHING TO REAL JWT" section at the bottom of this file for the
-    exact steps to take once the backend team responds.
+  - JWT verification: IMPLEMENTED (JWTAuthProvider) based on the
+    backend team's actual NestJS login source, confirmed 2026-08-29.
+    Two things still fail closed pending backend follow-up — see the
+    "STILL OPEN" list in app/core/config.py's Auth section:
+      - adult_eligible: no such claim exists in their tokens yet, so
+        every user is treated as NOT adult-eligible until they add it
+      - entitled: same — defaults to False until added
+  - Local API key mode (dev/testing only): IMPLEMENTED
+    (LocalAPIKeyAuthProvider) — still useful for testing flows that
+    need adult_eligible=True before the backend adds that claim, since
+    JWTAuthProvider cannot produce that today no matter what token you
+    give it.
 
-Per spec Section 30 and 66 ("do not fabricate functionality"), JWT
-verification logic requires the following confirmed from the backend
-team before it can be written:
+Confirmed from backend team's NestJS source (2026-08-29):
+  - Algorithm: HS256 (implied — jwtService.sign() with a plain secret
+    and no `algorithm` option)
+  - User ID claim: "id"
+  - No `iss`/`aud` claims are set — not verified here since none exist
+  - Secret: their ACCESS_TOKEN_SECRET value, set as JWT_SECRET
 
-  - JWT signing algorithm (HS256 vs RS256/ES256)
-  - Public key / JWKS URL, or shared secret
-  - Expected issuer (`iss`) and audience (`aud`)
-  - Exact claim name for the internal user UUID
-  - Exact claim name for the adult-eligibility flag
-  - Exact claim name for the entitlement/subscription flag
-
-Confirmed so far (2026-08-24): AUTH_MODE=jwt (for production),
-user_id / conversation_id / companion_id are UUIDs. The claim names
-and signing details are still open.
+Still open (not guessed — see config.py for full detail):
+  - Exact type/format of `user.id` from their Prisma schema (UUID?
+    cuid? autoincrement int?) — JWTAuthProvider currently requires it
+    to parse as a UUID and raises a clear AuthenticationError if not,
+    rather than silently coercing or guessing a conversion.
+  - adult_eligible / entitled claims — absent from their tokens today.
 """
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import Depends, Header
+from jose import JWTError, jwt as jose_jwt
 
 from app.core.config import AppEnv, AuthMode, Settings, get_settings
 from app.core.exceptions import AuthenticationError
+
+logger = logging.getLogger(__name__)
+
 
 
 @dataclass(frozen=True)
@@ -79,16 +87,98 @@ class AuthProvider(ABC):
 
 class NotConfiguredAuthProvider(AuthProvider):
     """
-    Placeholder provider used until JWT verification details are
-    confirmed. Always raises — this intentionally blocks any request
-    from being treated as authenticated so the service fails closed
-    rather than silently trusting unverified input.
+    Placeholder provider for auth modes with no implementation yet
+    (currently: internal_service_token). Always raises — this
+    intentionally blocks any request from being treated as
+    authenticated so the service fails closed rather than silently
+    trusting unverified input.
     """
 
     async def authenticate(self, headers: dict[str, str]) -> AuthContext:
         raise AuthenticationError(
-            "JWT verification is not yet configured. "
-            "See app/core/security.py TODO-CONFIRM items.",
+            "This auth mode is not yet configured. See app/core/security.py.",
+        )
+
+
+class JWTAuthProvider(AuthProvider):
+    """
+    Verifies JWTs issued by the main backend's NestJS auth service.
+
+    Based on their actual login service source (confirmed 2026-08-29):
+    HS256, secret-based, claims are `{ id, role, email }` — no `sub`,
+    no `iss`, no `aud`, no `adult_eligible`, no `entitled`.
+
+    adult_eligible and entitled are NOT present in their current
+    tokens. Per spec Section 28 ("fail closed" for missing eligibility
+    data), this provider does not guess or default these to True —
+    every request is treated as NOT adult-eligible and NOT entitled
+    until the backend team adds those claims. This is logged once per
+    request at DEBUG level (not WARNING/ERROR) since it is expected,
+    known, ongoing behavior until the backend change lands — not a
+    per-request anomaly worth alerting on.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        if not settings.JWT_SECRET:
+            raise RuntimeError(
+                "AUTH_MODE=jwt but JWT_SECRET is not set. Set it to the backend "
+                "team's ACCESS_TOKEN_SECRET value."
+            )
+        self._settings = settings
+
+    async def authenticate(self, headers: dict[str, str]) -> AuthContext:
+        authorization = headers.get("authorization")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise AuthenticationError("Missing or malformed Authorization header.")
+
+        token = authorization.removeprefix("Bearer ").strip()
+
+        try:
+            claims = jose_jwt.decode(
+                token,
+                self._settings.JWT_SECRET,
+                algorithms=[self._settings.JWT_ALGORITHM],
+                # No issuer/audience verification: the backend's token
+                # issuance code does not set iss/aud claims, so there is
+                # nothing to check them against (confirmed 2026-08-29).
+            )
+        except JWTError as exc:
+            raise AuthenticationError(f"Invalid or expired token: {exc}") from exc
+
+        raw_user_id = claims.get(self._settings.JWT_USER_ID_CLAIM)
+        if raw_user_id is None:
+            raise AuthenticationError(
+                f"Token is missing the expected '{self._settings.JWT_USER_ID_CLAIM}' claim."
+            )
+
+        try:
+            user_id = UUID(str(raw_user_id))
+        except ValueError as exc:
+            raise AuthenticationError(
+                f"The '{self._settings.JWT_USER_ID_CLAIM}' claim value "
+                f"({raw_user_id!r}) is not a valid UUID. This service's user "
+                "records require a UUID external_user_id — confirm with the "
+                "backend team what format their user IDs actually use "
+                "(UUID, cuid, autoincrement integer, etc.) if this keeps "
+                "happening."
+            ) from exc
+
+        adult_eligible_raw = claims.get(self._settings.JWT_ADULT_ELIGIBLE_CLAIM)
+        entitled_raw = claims.get(self._settings.JWT_ENTITLED_CLAIM)
+
+        if adult_eligible_raw is None or entitled_raw is None:
+            logger.debug(
+                "JWT for user_id=%s is missing adult_eligible and/or entitled "
+                "claims (backend has not added these yet) — failing closed: "
+                "adult_eligible=False, entitled=False.",
+                user_id,
+            )
+
+        return AuthContext(
+            user_id=user_id,
+            adult_eligible=bool(adult_eligible_raw) if adult_eligible_raw is not None else False,
+            entitled=bool(entitled_raw) if entitled_raw is not None else False,
+            raw_claims=claims,
         )
 
 
@@ -159,8 +249,10 @@ class LocalAPIKeyAuthProvider(AuthProvider):
 def get_auth_provider(settings: Settings = Depends(get_settings)) -> AuthProvider:
     if settings.AUTH_MODE == AuthMode.local_api_key:
         return LocalAPIKeyAuthProvider(settings)
-    # AuthMode.jwt and AuthMode.internal_service_token both fall back
-    # to the fail-closed placeholder until implemented.
+    if settings.AUTH_MODE == AuthMode.jwt:
+        return JWTAuthProvider(settings)
+    # internal_service_token falls back to the fail-closed placeholder
+    # until implemented.
     return NotConfiguredAuthProvider()
 
 
@@ -189,43 +281,41 @@ async def get_current_auth_context(
 
 
 # ============================================================================
-# SWITCHING TO REAL JWT — instructions for when the backend team responds
+# STATUS AS OF 2026-08-29 — what's real vs. still pending
 # ============================================================================
 #
-# Once you have all six answers (algorithm, key/JWKS, issuer, audience,
-# user-id claim name, adult-eligible claim name, entitled claim name):
+# JWTAuthProvider above is REAL and will correctly verify signatures,
+# reject expired/tampered tokens, and extract user_id from any token
+# actually issued by the backend's login service shown to us.
 #
-# 1. Fill in the real values in your .env:
-#      JWT_ALGORITHM=...
-#      JWT_PUBLIC_KEY=...          (or JWT_SECRET=... if HS256)
-#      JWT_ISSUER=...
-#      JWT_AUDIENCE=...
-#      JWT_USER_ID_CLAIM=...
-#      JWT_ADULT_ELIGIBLE_CLAIM=...
-#      JWT_ENTITLED_CLAIM=...
-#      AUTH_MODE=jwt
+# Two things still block full production behavior — both fail closed,
+# not fabricated:
 #
-# 2. In THIS file, add a new class (e.g. JWTAuthProvider(AuthProvider))
-#    that:
-#      - extracts the Bearer token from headers["authorization"]
-#      - verifies signature/issuer/audience using python-jose
-#        (already in requirements.txt) with settings.JWT_ALGORITHM /
-#        JWT_PUBLIC_KEY or JWT_SECRET / JWT_ISSUER / JWT_AUDIENCE
-#      - raises AuthenticationError on any verification failure
-#      - reads settings.JWT_USER_ID_CLAIM / JWT_ADULT_ELIGIBLE_CLAIM /
-#        JWT_ENTITLED_CLAIM out of the verified claims and returns an
-#        AuthContext
+#   1. adult_eligible / entitled claims don't exist in their tokens
+#      yet. Every authenticated user is currently treated as
+#      NOT adult-eligible and NOT entitled, regardless of their real
+#      status, until the backend team adds these claims to their
+#      jwtService.sign() payload.
 #
-# 3. In get_auth_provider() above, change the AuthMode.jwt branch from
-#    NotConfiguredAuthProvider() to JWTAuthProvider(settings).
+#   2. `user.id` format is unconfirmed. JWTAuthProvider requires it to
+#      parse as a UUID and raises a clear, descriptive
+#      AuthenticationError if it doesn't — it does not silently coerce
+#      or guess. If real tokens start failing with that error, the
+#      fix is either (a) get the backend team to confirm/adjust their
+#      ID format, or (b) if their IDs are genuinely not UUIDs (e.g.
+#      autoincrement integers), change `users.external_user_id` in
+#      this service's schema from UUID to a plain string type — that
+#      would need a migration, not just a config change.
 #
-# 4. Nothing else changes. Every endpoint, service, and repository
-#    already depends only on AuthContext (via get_current_auth_context),
-#    never on how it was produced — so conversation/chat logic, memory
-#    isolation, and every test built on LocalAPIKeyAuthProvider keeps
-#    working unmodified once real JWT is wired in.
+# TO ACTIVATE JWT AUTH FOR REAL TESTING RIGHT NOW:
+#   1. Set JWT_SECRET in .env to the backend team's actual
+#      ACCESS_TOKEN_SECRET value (get this from them securely — not
+#      pasted in plaintext chat/email).
+#   2. Set AUTH_MODE=jwt in .env.
+#   3. Get a real access token from their /login endpoint and use it
+#      as `Authorization: Bearer <token>` in requests to this service.
 #
-# 5. Before deploying to production, confirm AUTH_MODE=jwt in that
-#    environment's .env — LocalAPIKeyAuthProvider actively refuses to
-#    run when APP_ENV=production, but AUTH_MODE must still be switched
-#    manually so the app picks JWTAuthProvider instead.
+# Until the backend adds adult_eligible/entitled, you can still test
+# the romantic/intimate conversation path using
+# AUTH_MODE=local_api_key with X-Debug-Adult-Eligible: true — real JWT
+# auth cannot produce that today no matter what token you present.
