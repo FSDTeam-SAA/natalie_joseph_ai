@@ -1,0 +1,63 @@
+"""
+Shared service-construction dependencies for the API layer.
+"""
+
+from __future__ import annotations
+
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import Settings, get_settings
+from app.db.session import get_db_session
+from app.embeddings.base import EmbeddingProvider
+from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
+from app.llm.base import LLMProvider
+from app.llm.openai_provider import OpenAIProvider
+from app.moderation.base import ModerationProvider
+from app.moderation.openai_moderation import OpenAIModerationProvider
+from app.repositories.companion_repository import CompanionRepository
+from app.repositories.conversation_repository import ConversationRepository
+from app.repositories.message_repository import MessageRepository
+from app.repositories.user_repository import UserRepository
+from app.services.chat_service import ChatService
+from app.services.conversation_service import ConversationService
+
+
+def get_llm_provider(settings: Settings = Depends(get_settings)) -> LLMProvider:
+    return OpenAIProvider(api_key=settings.OPENAI_API_KEY)
+
+
+def get_embedding_provider(settings: Settings = Depends(get_settings)) -> EmbeddingProvider:
+    return OpenAIEmbeddingProvider(api_key=settings.OPENAI_API_KEY)
+
+
+def get_moderation_provider(settings: Settings = Depends(get_settings)) -> ModerationProvider:
+    return OpenAIModerationProvider(api_key=settings.OPENAI_API_KEY)
+
+
+def get_conversation_service(
+    db: AsyncSession = Depends(get_db_session),
+) -> ConversationService:
+    return ConversationService(
+        user_repo=UserRepository(db),
+        companion_repo=CompanionRepository(db),
+        conversation_repo=ConversationRepository(db),
+        message_repo=MessageRepository(db),
+    )
+
+
+def get_chat_service(
+    db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    moderation_provider: ModerationProvider = Depends(get_moderation_provider),
+) -> ChatService:
+    return ChatService(
+        user_repo=UserRepository(db),
+        companion_repo=CompanionRepository(db),
+        conversation_repo=ConversationRepository(db),
+        message_repo=MessageRepository(db),
+        llm_provider=llm_provider,
+        moderation_provider=moderation_provider,
+        settings=settings,
+    )

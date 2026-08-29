@@ -16,13 +16,20 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api import companions, health
-from app.core.config import get_settings
+from app.api import chat, companions, conversations, health
+from app.core.config import AppEnv, AuthMode, get_settings
 from app.core.exceptions import AppError
 from app.core.logging import configure_logging
 
 settings = get_settings()
 configure_logging(settings.LOG_LEVEL)
+
+if settings.APP_ENV == AppEnv.production and settings.AUTH_MODE == AuthMode.local_api_key:
+    raise RuntimeError(
+        "Refusing to start: AUTH_MODE=local_api_key is a development-only "
+        "auth mode and must never run with APP_ENV=production. Set "
+        "AUTH_MODE=jwt (and configure the JWT_* settings) for production."
+    )
 
 app = FastAPI(
     title="Meet Elysia — AI Companion Engine",
@@ -80,9 +87,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 app.include_router(health.router)
 app.include_router(companions.router, prefix=settings.API_V1_PREFIX)
+app.include_router(conversations.router, prefix=settings.API_V1_PREFIX)
+app.include_router(chat.router, prefix=settings.API_V1_PREFIX)
 
 # Business routers — registered here as they're delivered in later phases:
-# app.include_router(conversations.router, prefix=settings.API_V1_PREFIX, tags=["Conversations"])  # Phase 5
-# app.include_router(chat.router, prefix=settings.API_V1_PREFIX, tags=["Chat"])                # Phase 5/10
 # app.include_router(memories.router, prefix=settings.API_V1_PREFIX, tags=["Memories"])        # Phase 7
 # app.include_router(users.router, prefix=settings.API_V1_PREFIX, tags=["Users"])              # Phase 11
