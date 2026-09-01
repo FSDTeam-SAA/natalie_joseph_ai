@@ -12,7 +12,7 @@ from __future__ import annotations
 import enum
 import uuid
 
-from sqlalchemy import Enum as SAEnum
+from sqlalchemy import BigInteger, Enum as SAEnum, Identity
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -35,6 +35,24 @@ class Message(Base, UUIDPrimaryKeyMixin):
         PG_UUID(as_uuid=True),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
+    )
+
+    # Strictly increasing, gap-tolerant ordering key. created_at alone
+    # is NOT sufficient to order messages correctly: multiple messages
+    # inserted in the same transaction (e.g. a user message and the
+    # assistant's reply, written together in chat_service) can receive
+    # identical or ambiguously-close wall-clock timestamps, especially
+    # under real network latency (observed in practice against a
+    # hosted Postgres instance — two same-transaction inserts sorted
+    # in the wrong order under `ORDER BY created_at`). `sequence` uses
+    # a Postgres IDENTITY column, which guarantees a strictly
+    # increasing value per row regardless of timing. All ordering
+    # queries in MessageRepository use this column, not created_at.
+    sequence: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(always=False),
+        nullable=False,
+        unique=True,
     )
 
     role: Mapped[MessageRole] = mapped_column(
@@ -74,4 +92,5 @@ class Message(Base, UUIDPrimaryKeyMixin):
     __table_args__ = (
         Index("ix_messages_conversation_id", "conversation_id"),
         Index("ix_messages_created_at", "created_at"),
+        Index("ix_messages_conversation_id_sequence", "conversation_id", "sequence"),
     )

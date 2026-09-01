@@ -5,6 +5,12 @@ Per spec Section 11 ("Do not send unlimited conversation history —
 use recent turns") and Section 48 ("avoid unlimited message history"),
 `get_recent_for_conversation` always applies a limit — there is no
 "get all messages" method here by design.
+
+Ordering: uses Message.sequence (a strictly increasing IDENTITY
+column), not created_at. Wall-clock timestamps are not reliable for
+ordering messages inserted within the same transaction — see the
+`sequence` column's docstring in app/db/models/message.py for the
+real bug this fixes.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ class MessageRepository(BaseRepository[Message]):
         result = await self.session.execute(
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.sequence.desc())
             .limit(limit)
         )
         messages = list(result.scalars().all())
@@ -48,7 +54,7 @@ class MessageRepository(BaseRepository[Message]):
         result = await self.session.execute(
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
+            .order_by(Message.sequence.asc())
         )
         return list(result.scalars().all())
 

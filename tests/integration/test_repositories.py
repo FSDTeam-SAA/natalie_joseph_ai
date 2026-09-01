@@ -260,3 +260,76 @@ async def test_relationship_context_get_or_create(db: AsyncSession) -> None:
 
     assert first.id == second.id
     assert first.familiarity_level.value == "new"
+
+
+async def test_message_ordering_survives_identical_timestamps(db: AsyncSession) -> None:
+    """
+    Regression test for a real bug found during Phase 5 manual testing
+    against a hosted Postgres instance: a user message and its
+    assistant reply, inserted in the same transaction, sometimes
+    received identical (or ambiguously ordered) created_at timestamps,
+    causing ORDER BY created_at to return them in the wrong order.
+
+    This test deliberately forces identical created_at values —
+    reproducing the exact failure condition — and confirms ordering by
+    `sequence` still returns correct chronological order regardless.
+    """
+    from datetime import datetime, timezone
+
+    from app.db.models.companion import Companion
+    from app.db.models.conversation import Conversation
+    from app.db.models.message import Message, MessageRole
+
+    user_repo = UserRepository(db)
+    companion_repo = CompanionRepository(db)
+    conv_repo = ConversationRepository(db)
+    msg_repo = MessageRepository(db)
+
+    user = await user_repo.get_or_create_by_external_user_id(uuid.uuid4())
+    companion = await companion_repo.add(
+        Companion(
+            slug=f"test-seqfix-{uuid.uuid4().hex[:8]}",
+            name="SeqFixTest",
+            version=1,
+            personality_config={},
+            communication_config={},
+            background_config={},
+            interest_config={},
+            visual_config={},
+        )
+    )
+    conversation = await conv_repo.add(Conversation(user_id=user.id, companion_id=companion.id))
+
+    identical_timestamp = datetime.now(timezone.utc)
+
+    # Insert assistant FIRST but with the exact same timestamp as the
+    # user message inserted second — if ordering relied on created_at
+    # alone, this would very plausibly come back in the wrong order,
+    # which is exactly the bug this test guards against.
+    assistant_msg = Message(
+        conversation_id=conversation.id,
+        role=MessageRole.assistant,
+        content="assistant reply",
+        created_at=identical_timestamp,
+    )
+    await msg_repo.add(assistant_msg)
+
+    user_msg = Message(
+        conversation_id=conversation.id,
+        role=MessageRole.user,
+        content="user message",
+        created_at=identical_timestamp,
+    )
+    await msg_repo.add(user_msg)
+
+    ordered = await msg_repo.get_recent_for_conversation(conversation.id, limit=10)
+
+    assert len(ordered) == 2
+    # Correct order is INSERTION order (user's turn happened first in
+    # this test's intent — assistant was added first here specifically
+    # to prove sequence, not insertion coincidence, drives the result).
+    # What actually matters: ordering is deterministic and matches
+    # `sequence`, not accidentally correct due to timestamp luck.
+    assert ordered[0].sequence < ordered[1].sequence
+    assert ordered[0].id == assistant_msg.id
+    assert ordered[1].id == user_msg.id

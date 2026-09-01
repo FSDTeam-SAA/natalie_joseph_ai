@@ -38,12 +38,24 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import Depends, Header
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt as jose_jwt
 
 from app.core.config import AppEnv, AuthMode, Settings, get_settings
 from app.core.exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
+
+# Using a proper OpenAPI security scheme (HTTPBearer) instead of a
+# plain Header(alias="authorization") parameter. This is not just
+# stylistic — Swagger UI has a confirmed bug where a header parameter
+# literally named "Authorization" (declared as a plain header, not a
+# security scheme) is silently dropped from the outgoing "Try it out"
+# request even when the field displays the correct value. Using
+# HTTPBearer gives Swagger a dedicated "Authorize" button (padlock
+# icon) that reliably attaches the header on every subsequent request,
+# and is also the standard/correct FastAPI pattern for bearer auth.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 
@@ -257,7 +269,7 @@ def get_auth_provider(settings: Settings = Depends(get_settings)) -> AuthProvide
 
 
 async def get_current_auth_context(
-    authorization: str | None = Header(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     x_debug_user_id: str | None = Header(default=None),
     x_debug_adult_eligible: str | None = Header(default=None),
     x_debug_entitled: str | None = Header(default=None),
@@ -266,10 +278,15 @@ async def get_current_auth_context(
     """
     FastAPI dependency. Endpoints that require an authenticated user
     depend on this, never on AuthProvider directly.
+
+    The bearer token is now extracted via the HTTPBearer security
+    scheme (see bearer_scheme above) rather than a raw Header —
+    this fixes a Swagger UI bug where a plain header parameter named
+    "authorization" was silently dropped from outgoing requests.
     """
     headers: dict[str, str] = {}
-    if authorization is not None:
-        headers["authorization"] = authorization
+    if credentials is not None:
+        headers["authorization"] = f"{credentials.scheme} {credentials.credentials}"
     if x_debug_user_id is not None:
         headers["x-debug-user-id"] = x_debug_user_id
     if x_debug_adult_eligible is not None:
