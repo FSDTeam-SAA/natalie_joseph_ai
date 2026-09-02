@@ -2,7 +2,7 @@
 companions table.
 
 Per spec Section 2: the five companion IDs must be stable
-(elena, chloe, thalia, anastacia, luna). That stability requirement is
+(elena, chloe, thalia, lina, luna). That stability requirement is
 implemented via `slug` (a short, stable, human-readable string), while
 `id` remains a normal UUID primary key used for foreign keys elsewhere
 — this keeps FK columns consistent with every other table while still
