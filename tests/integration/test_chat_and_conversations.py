@@ -1,12 +1,21 @@
 """
-Integration tests for Phase 5: dev-mode auth, conversation endpoints,
-and the chat endpoint.
+Integration tests for dev-mode auth, conversation endpoints, and the
+chat endpoint (Phase 5 base + Phase 7 memory wiring).
 
 OpenAI calls are mocked at the SDK boundary (same approach as Phase 4
 unit tests) since this environment has no network access to
 api.openai.com. Everything else — auth, database writes, ownership
 checks, moderation branching, message persistence — runs for real
 against the real (schema-isolated) test database.
+
+Phase 7 note: test_send_message_happy_path now also mocks
+OpenAIEmbeddingProvider.embed_text (memory retrieval runs on every
+chat request) and OpenAIProvider.generate_structured (memory
+extraction runs as a background task after the response). Both are
+mocked to return "nothing to do" (an empty-vector query result / an
+empty memories list) since this test's concern is the chat flow
+itself, not memory behavior — that's covered separately in
+test_memory_service.py and test_memory_extraction_e2e below.
 """
 
 from __future__ import annotations
@@ -172,6 +181,7 @@ class TestChatEndpoint:
         )
         conversation_id = conv_resp.json()["id"]
 
+        from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
         from app.moderation.openai_moderation import OpenAIModerationProvider
 
@@ -194,6 +204,37 @@ class TestChatEndpoint:
                         usage=SimpleNamespace(input_tokens=50, output_tokens=20),
                         model="gpt-5.6-terra",
                         raw_response_id="resp_test123",
+                    )
+                ),
+            ),
+            # Phase 7: retrieve_relevant() always embeds the incoming
+            # message before generation. Dimension must be 1536 to
+            # match the memories.embedding column, or pgvector errors
+            # at the SQL layer regardless of row count.
+            patch.object(
+                OpenAIEmbeddingProvider,
+                "embed_text",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        vector=[0.0] * 1536,
+                        model="text-embedding-3-small",
+                        dimensions=1536,
+                    )
+                ),
+            ),
+            # Phase 7: extract_and_store() runs as a background task
+            # after the response is built. Returning an empty list
+            # keeps this test focused on the chat flow, not memory
+            # extraction behavior.
+            patch.object(
+                OpenAIProvider,
+                "generate_structured",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        data={"memories": []},
+                        usage=SimpleNamespace(input_tokens=30, output_tokens=10),
+                        model="gpt-5.6-luna",
+                        raw_response_id="resp_extract_test",
                     )
                 ),
             ),

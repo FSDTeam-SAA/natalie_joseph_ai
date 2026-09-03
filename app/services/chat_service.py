@@ -1,33 +1,65 @@
 """
-Chat service — Phase 6 scope.
+Chat service — Phase 7 scope + adult-eligibility-aware moderation fix.
 
-Implements the spec Section 18 flow. As of Phase 6:
-  - System prompt assembly now goes through the modular PromptBuilder
-    (app/llm/prompts/), replacing the Phase 5 interim single-function
-    prompt. Assembly order and section skipping are documented in
-    app/llm/prompts/sections.py.
-  - relationship_context is now fetched (or created, on first contact)
-    per user+companion and fed into the prompt at a basic level (spec
-    Section 32) — this is a read, not a write; nothing here updates
-    familiarity/depth/tone yet.
-  - conversation.summary is threaded into PromptContext, but nothing
-    populates it yet — it stays None until the Phase 8 background
-    summarization job exists.
+Implements the spec Section 18 flow. As of this update:
+  - Long-term memory retrieval is now wired in: before building the
+    prompt, MemoryService.retrieve_relevant() embeds the current
+    message and does a cosine nearest-neighbor search scoped to
+    (user, companion), feeding results into
+    PromptContext.retrieved_memories (the Phase 6 extension point).
+  - Memory extraction runs as a FastAPI BackgroundTask scheduled at
+    the very end of send_message, after the response has already been
+    built and persisted — it never adds latency to the user-facing
+    request, and a failure there can never affect the response already
+    sent. See app/services/memory_service.py's module docstring for
+    the full design rationale, including why this is a BackgroundTask
+    rather than a Celery job (Phase 8 doesn't exist yet) and the
+    interim durability limitation that implies.
+  - Moderation is now category-aware and adult_eligible-aware (see
+    ADULT_ELIGIBLE_ALLOWED_CATEGORIES below), pulled forward from
+    Phase 9 because it was blocking real intimate-conversation testing:
+    OpenAI's moderation `flagged` bool trips on the plain "sexual"
+    category same as it does on categories that must never be
+    allowed (sexual/minors, violence, hate, self-harm, etc). Previously
+    ChatService blocked on that raw bool regardless of adult_eligible,
+    which meant an adult-verified user's own intimate reply from the
+    companion was silently replaced by the generic fallback below —
+    the romantic/intimate feature could not actually work. Now: the
+    "sexual" category alone is let through when adult_eligible=True;
+    every other flagged category still blocks unconditionally,
+    regardless of adult_eligible. Both directions (input and output)
+    use the same gate — a user's own intimate message is no longer
+    at risk of being blocked outright either.
+  - Every moderation outcome is now logged to safety_events, not just
+    blocks — action="allowed_adult_content" is logged when "sexual" is
+    let through, so there's an audit trail either way.
+  - This does NOT guarantee any particular level of explicitness in
+    what the companion actually says — the underlying chat model's own
+    training/alignment can still soften or decline very explicit
+    requests independent of this moderation gate. Fixing the gate
+    removes the code-side block; it can't override the model itself.
+
+Carried over from Phase 6, unchanged:
+  - PromptBuilder-based system prompt assembly (app/llm/prompts/).
+  - relationship_context fetched (or created) per user+companion and
+    fed into the prompt at a basic read-only level.
+  - conversation.summary threaded into PromptContext; still always
+    None until the Phase 8 background summarization job exists.
 
 Still explicitly later phases:
-  - NO long-term memory retrieval (Phase 7) — PromptContext accepts
-    retrieved_memories, but nothing supplies it yet.
-  - NO conversation summary generation (Phase 8) — see above.
-  - NO safety policy engine / injection defenses / dependency
-    safeguard enforcement beyond basic OpenAI moderation (Phase 9).
+  - NO conversation summary generation (Phase 8).
+  - NO full safety policy engine / injection defenses / dependency
+    safeguard enforcement beyond moderation (Phase 9). The category
+    allow-list below is a narrow, deliberate pull-forward of one part
+    of that work — not the full policy engine itself.
 
 What IS implemented, deliberately, rather than deferred:
   - Real input and output moderation via the OpenAIModerationProvider
     built in Phase 4 — shipping a companion chat endpoint with zero
     moderation, even temporarily, was judged not acceptable.
-  - Basic safety_events logging when moderation blocks something,
-    since the table already exists (Phase 2) and the data is already
-    on hand at the point moderation runs.
+  - safety_events logging for every moderation outcome that isn't a
+    plain pass-through, since the table already exists (Phase 2) and
+    the data is already on hand at the point moderation runs.
   - Basic ai_events logging for token/latency observability, for the
     same reason — full cost-dollar tracking (CostTracker) remains a
     later phase, but the raw event row is cheap to write now.
@@ -39,6 +71,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from fastapi import BackgroundTasks
+
 from app.core.config import Settings
 from app.core.exceptions import ModerationBlockedError, NotFoundError, ValidationError
 from app.core.security import AuthContext
@@ -48,13 +82,14 @@ from app.db.models.safety_event import SafetyDirection, SafetyEvent
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.prompts.context import PromptContext
-from app.moderation.base import ModerationProvider
+from app.moderation.base import ModerationProvider, ModerationResult
 from app.repositories.companion_repository import CompanionRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.repositories.relationship_repository import RelationshipRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.chat import ChatRequest, ChatResponse, ChatUsage
+from app.services.memory_service import MemoryService
 
 # Fallback text shown to the user when the model's own output is
 # flagged by moderation — the flagged text itself is never returned
@@ -63,6 +98,35 @@ OUTPUT_MODERATION_FALLBACK = (
     "I want to be thoughtful about how I respond to that — could we talk about "
     "something else, or rephrase what you're looking for?"
 )
+
+# The ONLY moderation category that becomes conditional on
+# adult_eligible. Every other category OpenAI flags -- sexual/minors,
+# violence, violence/graphic, hate, hate/threatening, harassment,
+# harassment/threatening, self-harm and its subcategories, illicit,
+# illicit/violent, etc. -- blocks unconditionally, regardless of
+# adult_eligible. This is a narrow, explicit allow-list, not a
+# general-purpose bypass: adding a category here should never be done
+# casually.
+ADULT_ELIGIBLE_ALLOWED_CATEGORIES = frozenset({"sexual"})
+
+
+def _moderation_blocks(result: ModerationResult, *, adult_eligible: bool) -> bool:
+    """
+    True if this moderation result should block the message.
+
+    Fail-closed: if a moderation call ever returns flagged=True with
+    an empty/missing categories dict (a malformed or unexpected
+    response), this blocks -- it never treats "no category detail" as
+    "safe to allow through".
+    """
+    if not result.flagged:
+        return False
+    flagged_categories = {cat for cat, is_flagged in result.categories.items() if is_flagged}
+    if not flagged_categories:
+        return True
+    if not adult_eligible:
+        return True
+    return not flagged_categories.issubset(ADULT_ELIGIBLE_ALLOWED_CATEGORIES)
 
 
 class ChatService:
@@ -77,6 +141,7 @@ class ChatService:
         llm_provider: LLMProvider,
         moderation_provider: ModerationProvider,
         prompt_builder: PromptBuilder,
+        memory_service: MemoryService,
         settings: Settings,
     ) -> None:
         self.user_repo = user_repo
@@ -87,6 +152,7 @@ class ChatService:
         self.llm_provider = llm_provider
         self.moderation_provider = moderation_provider
         self.prompt_builder = prompt_builder
+        self.memory_service = memory_service
         self.settings = settings
 
     async def _log_safety_event(
@@ -96,7 +162,8 @@ class ChatService:
         user_id: uuid.UUID,
         conversation_id: uuid.UUID,
         direction: SafetyDirection,
-        moderation_result,
+        moderation_result: ModerationResult,
+        action: str,
     ) -> None:
         flagged_categories = [
             cat for cat, flagged in moderation_result.categories.items() if flagged
@@ -108,12 +175,14 @@ class ChatService:
             direction=direction,
             category=", ".join(flagged_categories) if flagged_categories else None,
             severity=None,  # TODO-CONFIRM scale in Phase 9
-            action="blocked",
+            action=action,
         )
         self.message_repo.session.add(event)
         await self.message_repo.session.flush()
 
-    async def send_message(self, auth: AuthContext, request: ChatRequest) -> ChatResponse:
+    async def send_message(
+        self, auth: AuthContext, request: ChatRequest, background_tasks: BackgroundTasks
+    ) -> ChatResponse:
         request_id = uuid.uuid4()
 
         user = await self.user_repo.get_or_create_by_external_user_id(auth.user_id)
@@ -133,20 +202,37 @@ class ChatService:
             )
 
         # --- Input moderation (spec Section 26) ---
+        # Category-aware + adult_eligible-aware: "sexual" alone is let
+        # through for adult-verified users so they can actually
+        # express what they want to talk about; every other flagged
+        # category still blocks unconditionally. See
+        # _moderation_blocks()'s docstring above.
         input_moderation = await self.moderation_provider.moderate_text(
             request.message, model=self.settings.OPENAI_MODERATION_MODEL
         )
-        if input_moderation.flagged:
+        if _moderation_blocks(input_moderation, adult_eligible=auth.adult_eligible):
             await self._log_safety_event(
                 request_id=request_id,
                 user_id=user.id,
                 conversation_id=conversation.id,
                 direction=SafetyDirection.input,
                 moderation_result=input_moderation,
+                action="blocked",
             )
             await self.message_repo.session.commit()
             raise ModerationBlockedError(
                 "Your message couldn't be processed. Please rephrase and try again."
+            )
+        if input_moderation.flagged:
+            # Flagged but allowed through (adult_eligible + sexual-only).
+            # Logged for audit, not blocking.
+            await self._log_safety_event(
+                request_id=request_id,
+                user_id=user.id,
+                conversation_id=conversation.id,
+                direction=SafetyDirection.input,
+                moderation_result=input_moderation,
+                action="allowed_adult_content",
             )
 
         # --- Basic relationship_context wiring (spec Section 32) ---
@@ -159,12 +245,24 @@ class ChatService:
             user.id, companion.id
         )
 
+        # --- Long-term memory retrieval (Phase 7) ---
+        # Synchronous and on the critical path deliberately — unlike
+        # extraction below, retrieved memories directly shape this
+        # turn's prompt, so they can't be deferred to a background
+        # task. Degrades to an empty list on any failure (embedding
+        # API error, DB error) rather than breaking the chat request —
+        # see MemoryService.retrieve_relevant()'s docstring.
+        retrieved_memories = await self.memory_service.retrieve_relevant(
+            user_id=user.id, companion_id=companion.id, query_text=request.message
+        )
+
         # --- Build system prompt (PromptBuilder, Phase 6) + recent history ---
         prompt_context = PromptContext(
             companion=companion,
             auth=auth,
             user=user,
             relationship_context=relationship_context,
+            retrieved_memories=retrieved_memories,
             conversation_summary=conversation.summary,
         )
         system_prompt = self.prompt_builder.build_system_prompt(prompt_context)
@@ -187,19 +285,30 @@ class ChatService:
         latency_ms = (time.perf_counter() - start) * 1000
 
         # --- Output moderation (spec Section 26) ---
+        # Same gate as input moderation above.
         output_moderation = await self.moderation_provider.moderate_text(
             result.text, model=self.settings.OPENAI_MODERATION_MODEL
         )
         final_text = result.text
-        if output_moderation.flagged:
+        if _moderation_blocks(output_moderation, adult_eligible=auth.adult_eligible):
             await self._log_safety_event(
                 request_id=request_id,
                 user_id=user.id,
                 conversation_id=conversation.id,
                 direction=SafetyDirection.output,
                 moderation_result=output_moderation,
+                action="blocked",
             )
             final_text = OUTPUT_MODERATION_FALLBACK
+        elif output_moderation.flagged:
+            await self._log_safety_event(
+                request_id=request_id,
+                user_id=user.id,
+                conversation_id=conversation.id,
+                direction=SafetyDirection.output,
+                moderation_result=output_moderation,
+                action="allowed_adult_content",
+            )
 
         # --- Persist user + assistant messages ---
         user_message = Message(
@@ -240,6 +349,22 @@ class ChatService:
 
         await self.message_repo.session.commit()
         await self.message_repo.session.refresh(assistant_message)
+
+        # --- Memory extraction (Phase 7) ---
+        # Scheduled after commit, so it never delays the response and
+        # a failure here can never roll back or affect what was
+        # already persisted/returned. Uses final_text (what the user
+        # actually saw) rather than the pre-moderation result.text, so
+        # a fallback-replaced reply never gets treated as a source of
+        # facts about the user.
+        background_tasks.add_task(
+            self.memory_service.extract_and_store,
+            conversation_id=conversation.id,
+            user_id=user.id,
+            companion_id=companion.id,
+            user_message=request.message,
+            assistant_message=final_text,
+        )
 
         return ChatResponse(
             message_id=assistant_message.id,
