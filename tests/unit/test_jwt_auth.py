@@ -21,7 +21,7 @@ from jose import jwt as jose_jwt
 
 from app.core.config import AuthMode, Settings
 from app.core.exceptions import AuthenticationError
-from app.core.security import JWTAuthProvider
+from app.core.security import InternalServiceTokenAuthProvider, JWTAuthProvider
 
 TEST_SECRET = "test-access-token-secret"
 
@@ -43,8 +43,17 @@ def _make_settings(**overrides) -> Settings:
     return Settings(**defaults)
 
 
-def _sign(payload: dict, *, secret: str = TEST_SECRET, algorithm: str = "HS256") -> str:
-    return jose_jwt.encode(payload, secret, algorithm=algorithm)
+def _sign(
+    payload: dict,
+    *,
+    secret: str = TEST_SECRET,
+    algorithm: str = "HS256",
+    include_exp: bool = True,
+) -> str:
+    claims = dict(payload)
+    if include_exp and "exp" not in claims:
+        claims["exp"] = int(time.time()) + 300
+    return jose_jwt.encode(claims, secret, algorithm=algorithm)
 
 
 class TestJWTAuthProviderHappyPath:
@@ -95,6 +104,45 @@ class TestJWTAuthProviderHappyPath:
         assert auth.adult_eligible is True
         assert auth.entitled is True
 
+    async def test_feature_scopes_are_extracted(self) -> None:
+        provider = JWTAuthProvider(_make_settings())
+        token = _sign(
+            {
+                "id": str(uuid.uuid4()),
+                "ai_features": ["voice_input", "image"],
+            }
+        )
+
+        auth = await provider.authenticate({"authorization": f"Bearer {token}"})
+
+        assert auth.features == frozenset({"voice_input", "image"})
+        assert auth.allows("image") is True
+        assert auth.allows("voice_output") is False
+
+    async def test_explicit_empty_feature_list_denies_entitled_user(self) -> None:
+        provider = JWTAuthProvider(_make_settings())
+        token = _sign(
+            {
+                "id": str(uuid.uuid4()),
+                "entitled": True,
+                "ai_features": [],
+            }
+        )
+
+        auth = await provider.authenticate({"authorization": f"Bearer {token}"})
+
+        assert auth.features == frozenset()
+        assert auth.allows("chat") is False
+
+    async def test_absent_feature_list_uses_legacy_entitlement_fallback(self) -> None:
+        provider = JWTAuthProvider(_make_settings())
+        token = _sign({"id": str(uuid.uuid4()), "entitled": True})
+
+        auth = await provider.authenticate({"authorization": f"Bearer {token}"})
+
+        assert auth.features is None
+        assert auth.allows("chat") is True
+
 
 class TestJWTAuthProviderRejections:
     async def test_missing_authorization_header_rejected(self) -> None:
@@ -121,6 +169,20 @@ class TestJWTAuthProviderRejections:
         with pytest.raises(AuthenticationError):
             await provider.authenticate({"authorization": f"Bearer {token}"})
 
+    async def test_missing_exp_rejected(self) -> None:
+        provider = JWTAuthProvider(_make_settings())
+        token = _sign({"id": str(uuid.uuid4())}, include_exp=False)
+
+        with pytest.raises(AuthenticationError):
+            await provider.authenticate({"authorization": f"Bearer {token}"})
+
+    async def test_string_false_privilege_claim_is_rejected(self) -> None:
+        provider = JWTAuthProvider(_make_settings())
+        token = _sign({"id": str(uuid.uuid4()), "adult_eligible": "false"})
+
+        with pytest.raises(AuthenticationError, match="JSON boolean"):
+            await provider.authenticate({"authorization": f"Bearer {token}"})
+
     async def test_missing_user_id_claim_rejected(self) -> None:
         provider = JWTAuthProvider(_make_settings())
         token = _sign({"role": "user", "email": "a@b.com"})  # no "id" claim
@@ -144,3 +206,63 @@ class TestJWTAuthProviderRejections:
     async def test_missing_secret_raises_at_construction(self) -> None:
         with pytest.raises(RuntimeError, match="JWT_SECRET is not set"):
             JWTAuthProvider(_make_settings(JWT_SECRET=""))
+
+
+class TestInternalServiceTokenAuthProvider:
+    async def test_trusted_backend_context(self) -> None:
+        settings = _make_settings(
+            AUTH_MODE=AuthMode.internal_service_token,
+            INTERNAL_SERVICE_TOKEN="backend-secret",
+        )
+        provider = InternalServiceTokenAuthProvider(settings)
+        user_id = uuid.uuid4()
+
+        auth = await provider.authenticate(
+            {
+                "authorization": "Bearer backend-secret",
+                "x-backend-user-id": str(user_id),
+                "x-backend-adult-eligible": "false",
+                "x-backend-entitled": "true",
+                "x-backend-ai-features": "voice_input,image",
+            }
+        )
+
+        assert auth.user_id == user_id
+        assert auth.adult_eligible is False
+        assert auth.entitled is True
+        assert auth.features == frozenset({"voice_input", "image"})
+
+    async def test_explicit_empty_backend_features_are_authoritative(self) -> None:
+        settings = _make_settings(
+            AUTH_MODE=AuthMode.internal_service_token,
+            INTERNAL_SERVICE_TOKEN="backend-secret",
+        )
+        provider = InternalServiceTokenAuthProvider(settings)
+
+        auth = await provider.authenticate(
+            {
+                "authorization": "Bearer backend-secret",
+                "x-backend-user-id": str(uuid.uuid4()),
+                "x-backend-entitled": "true",
+                "x-backend-ai-features": "",
+            }
+        )
+
+        assert auth.features == frozenset()
+        assert auth.allows("chat") is False
+
+    async def test_invalid_backend_boolean_fails_closed(self) -> None:
+        settings = _make_settings(
+            AUTH_MODE=AuthMode.internal_service_token,
+            INTERNAL_SERVICE_TOKEN="backend-secret",
+        )
+        provider = InternalServiceTokenAuthProvider(settings)
+
+        with pytest.raises(AuthenticationError):
+            await provider.authenticate(
+                {
+                    "authorization": "Bearer backend-secret",
+                    "x-backend-user-id": str(uuid.uuid4()),
+                    "x-backend-entitled": "yes",
+                }
+            )

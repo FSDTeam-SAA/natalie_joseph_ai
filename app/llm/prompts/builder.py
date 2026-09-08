@@ -36,5 +36,5 @@ class PromptBuilder:
         return f"{body}\n\n{_DO_NOT_REVEAL_NOTE}"
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "PromptBuilder":
+    def from_settings(cls, settings: Settings) -> PromptBuilder:
         return cls(prompt_version=settings.PROMPT_VERSION)

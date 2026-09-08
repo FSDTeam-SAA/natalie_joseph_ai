@@ -1,0 +1,1 @@
+"""Companion image generation providers."""

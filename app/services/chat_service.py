@@ -1,95 +1,38 @@
-"""
-Chat service — Phase 7 scope + adult-eligibility-aware moderation fix.
+"""Moderated Grok chat with persona, memory, story, and relationship continuity.
 
-Implements the spec Section 18 flow. As of this update:
-  - Long-term memory retrieval is now wired in: before building the
-    prompt, MemoryService.retrieve_relevant() embeds the current
-    message and does a cosine nearest-neighbor search scoped to
-    (user, companion), feeding results into
-    PromptContext.retrieved_memories (the Phase 6 extension point).
-  - Memory extraction runs as a FastAPI BackgroundTask scheduled at
-    the very end of send_message, after the response has already been
-    built and persisted — it never adds latency to the user-facing
-    request, and a failure there can never affect the response already
-    sent. See app/services/memory_service.py's module docstring for
-    the full design rationale, including why this is a BackgroundTask
-    rather than a Celery job (Phase 8 doesn't exist yet) and the
-    interim durability limitation that implies.
-  - Moderation is now category-aware and adult_eligible-aware (see
-    ADULT_ELIGIBLE_ALLOWED_CATEGORIES below), pulled forward from
-    Phase 9 because it was blocking real intimate-conversation testing:
-    OpenAI's moderation `flagged` bool trips on the plain "sexual"
-    category same as it does on categories that must never be
-    allowed (sexual/minors, violence, hate, self-harm, etc). Previously
-    ChatService blocked on that raw bool regardless of adult_eligible,
-    which meant an adult-verified user's own intimate reply from the
-    companion was silently replaced by the generic fallback below —
-    the romantic/intimate feature could not actually work. Now: the
-    "sexual" category alone is let through when adult_eligible=True;
-    every other flagged category still blocks unconditionally,
-    regardless of adult_eligible. Both directions (input and output)
-    use the same gate — a user's own intimate message is no longer
-    at risk of being blocked outright either.
-  - Every moderation outcome is now logged to safety_events, not just
-    blocks — action="allowed_adult_content" is logged when "sexual" is
-    let through, so there's an audit trail either way.
-  - This does NOT guarantee any particular level of explicitness in
-    what the companion actually says — the underlying chat model's own
-    training/alignment can still soften or decline very explicit
-    requests independent of this moderation gate. Fixing the gate
-    removes the code-side block; it can't override the model itself.
-
-Carried over from Phase 6, unchanged:
-  - PromptBuilder-based system prompt assembly (app/llm/prompts/).
-  - relationship_context fetched (or created) per user+companion and
-    fed into the prompt at a basic read-only level.
-  - conversation.summary threaded into PromptContext; still always
-    None until the Phase 8 background summarization job exists.
-
-Still explicitly later phases:
-  - NO conversation summary generation (Phase 8).
-  - NO full safety policy engine / injection defenses / dependency
-    safeguard enforcement beyond moderation (Phase 9). The category
-    allow-list below is a narrow, deliberate pull-forward of one part
-    of that work — not the full policy engine itself.
-
-What IS implemented, deliberately, rather than deferred:
-  - Real input and output moderation via the OpenAIModerationProvider
-    built in Phase 4 — shipping a companion chat endpoint with zero
-    moderation, even temporarily, was judged not acceptable.
-  - safety_events logging for every moderation outcome that isn't a
-    plain pass-through, since the table already exists (Phase 2) and
-    the data is already on hand at the point moderation runs.
-  - Basic ai_events logging for token/latency observability, for the
-    same reason — full cost-dollar tracking (CostTracker) remains a
-    later phase, but the raw event row is cheap to write now.
+Input and output are moderated around a single shared conversation pipeline.
+Only the trusted backend decides age and feature eligibility. User facts are
+retrieved synchronously for the current response; extraction, rolling summaries,
+and relationship progression run after the response is committed.
 """
 
 from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import BackgroundTasks
 
 from app.core.config import Settings
 from app.core.exceptions import ModerationBlockedError, NotFoundError, ValidationError
-from app.core.security import AuthContext
+from app.core.security import AuthContext, require_feature
 from app.db.models.ai_event import AIEvent
-from app.db.models.message import Message, MessageRole
+from app.db.models.message import Message, MessageRole, MessageType
 from app.db.models.safety_event import SafetyDirection, SafetyEvent
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.prompts.context import PromptContext
 from app.moderation.base import ModerationProvider, ModerationResult
-from app.repositories.companion_repository import CompanionRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.repositories.relationship_repository import RelationshipRepository
+from app.repositories.story_event_repository import StoryEventRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.chat import ChatRequest, ChatResponse, ChatUsage
 from app.services.memory_service import MemoryService
+from app.services.post_turn_processor import PostTurnProcessor
+from app.services.companion_service import CompanionService
 
 # Fallback text shown to the user when the model's own output is
 # flagged by moderation — the flagged text itself is never returned
@@ -134,7 +77,7 @@ class ChatService:
         self,
         *,
         user_repo: UserRepository,
-        companion_repo: CompanionRepository,
+        companion_service: CompanionService,
         conversation_repo: ConversationRepository,
         message_repo: MessageRepository,
         relationship_repo: RelationshipRepository,
@@ -143,9 +86,11 @@ class ChatService:
         prompt_builder: PromptBuilder,
         memory_service: MemoryService,
         settings: Settings,
+        post_turn_processor: PostTurnProcessor | None = None,
+        story_repo: StoryEventRepository | None = None,
     ) -> None:
         self.user_repo = user_repo
-        self.companion_repo = companion_repo
+        self.companion_service = companion_service
         self.conversation_repo = conversation_repo
         self.message_repo = message_repo
         self.relationship_repo = relationship_repo
@@ -154,6 +99,8 @@ class ChatService:
         self.prompt_builder = prompt_builder
         self.memory_service = memory_service
         self.settings = settings
+        self.post_turn_processor = post_turn_processor
+        self.story_repo = story_repo
 
     async def _log_safety_event(
         self,
@@ -174,22 +121,31 @@ class ChatService:
             conversation_id=conversation_id,
             direction=direction,
             category=", ".join(flagged_categories) if flagged_categories else None,
-            severity=None,  # TODO-CONFIRM scale in Phase 9
+            severity=None,
             action=action,
         )
         self.message_repo.session.add(event)
         await self.message_repo.session.flush()
 
     async def send_message(
-        self, auth: AuthContext, request: ChatRequest, background_tasks: BackgroundTasks
+        self,
+        auth: AuthContext,
+        request: ChatRequest,
+        background_tasks: BackgroundTasks,
+        *,
+        user_message_type: MessageType = MessageType.text,
     ) -> ChatResponse:
+        require_feature(auth, "chat")
         request_id = uuid.uuid4()
 
         user = await self.user_repo.get_or_create_by_external_user_id(auth.user_id)
 
-        companion = await self.companion_repo.get_by_id(request.companion_id)
-        if companion is None or not companion.active:
-            raise ValidationError(f"Companion {request.companion_id} does not exist or is inactive.")
+        try:
+            companion = await self.companion_service.get_active_profile(request.companion_id)
+        except NotFoundError as exc:
+            raise ValidationError(
+                f"Companion {request.companion_id} does not exist or is inactive."
+            ) from exc
 
         conversation = await self.conversation_repo.get_by_id_for_user(
             request.conversation_id, user.id
@@ -200,6 +156,47 @@ class ChatService:
             raise ValidationError(
                 "The given companion_id does not match this conversation's companion."
             )
+
+        if request.idempotency_key is not None:
+            await self.message_repo.acquire_idempotency_lock(
+                scope="chat", request_id=request.idempotency_key
+            )
+            existing_user_message = await self.message_repo.get_user_by_request_id(
+                conversation_id=conversation.id,
+                request_id=request.idempotency_key,
+            )
+            if existing_user_message is not None:
+                if existing_user_message.content != request.message:
+                    raise ValidationError(
+                        "The idempotency_key was already used with different message content."
+                    )
+                existing_assistant = await self.message_repo.get_first_assistant_after(
+                    conversation_id=conversation.id,
+                    sequence=existing_user_message.sequence,
+                )
+                if existing_assistant is None:
+                    raise ValidationError(
+                        "The previous request with this idempotency key is incomplete."
+                    )
+                response = ChatResponse(
+                    message_id=existing_assistant.id,
+                    conversation_id=conversation.id,
+                    companion_id=companion.id,
+                    response=existing_assistant.content,
+                    created_at=existing_assistant.created_at,
+                    usage=ChatUsage(
+                        input_tokens=existing_assistant.input_tokens or 0,
+                        output_tokens=existing_assistant.output_tokens or 0,
+                    ),
+                    message_type=existing_assistant.message_type.value,
+                    transcript=(
+                        existing_user_message.content
+                        if existing_user_message.message_type == MessageType.audio
+                        else None
+                    ),
+                )
+                await self.message_repo.session.commit()
+                return response
 
         # --- Input moderation (spec Section 26) ---
         # Category-aware + adult_eligible-aware: "sexual" alone is let
@@ -255,6 +252,11 @@ class ChatService:
         retrieved_memories = await self.memory_service.retrieve_relevant(
             user_id=user.id, companion_id=companion.id, query_text=request.message
         )
+        story_events = (
+            await self.story_repo.list_recent(companion.id)
+            if self.story_repo is not None
+            else []
+        )
 
         # --- Build system prompt (PromptBuilder, Phase 6) + recent history ---
         prompt_context = PromptContext(
@@ -264,6 +266,7 @@ class ChatService:
             relationship_context=relationship_context,
             retrieved_memories=retrieved_memories,
             conversation_summary=conversation.summary,
+            story_events=[event.prompt_fact for event in story_events],
         )
         system_prompt = self.prompt_builder.build_system_prompt(prompt_context)
         recent_messages = await self.message_repo.get_recent_for_conversation(
@@ -280,7 +283,11 @@ class ChatService:
         # --- Generate ---
         start = time.perf_counter()
         result = await self.llm_provider.generate(
-            llm_messages, model=self.settings.OPENAI_CHAT_MODEL
+            llm_messages,
+            model=self.settings.XAI_MODEL,
+            max_output_tokens=self.settings.CHAT_MAX_OUTPUT_TOKENS,
+            cache_key=f"conversation:{conversation.id}",
+            reasoning_effort=self.settings.XAI_REASONING_EFFORT,
         )
         latency_ms = (time.perf_counter() - start) * 1000
 
@@ -315,6 +322,8 @@ class ChatService:
             conversation_id=conversation.id,
             role=MessageRole.user,
             content=request.message,
+            message_type=user_message_type,
+            client_request_id=request.idempotency_key,
         )
         self.message_repo.session.add(user_message)
 
@@ -344,27 +353,29 @@ class ChatService:
             latency_ms=latency_ms,
             input_tokens=result.usage.input_tokens,
             output_tokens=result.usage.output_tokens,
+            event_metadata=result.usage.as_metadata(),
         )
         self.message_repo.session.add(ai_event)
+
+        # Keep "latest conversation" selection accurate for the trusted-backend adapter.
+        conversation.updated_at = datetime.now(UTC)
 
         await self.message_repo.session.commit()
         await self.message_repo.session.refresh(assistant_message)
 
-        # --- Memory extraction (Phase 7) ---
-        # Scheduled after commit, so it never delays the response and
-        # a failure here can never roll back or affect what was
-        # already persisted/returned. Uses final_text (what the user
-        # actually saw) rather than the pre-moderation result.text, so
-        # a fallback-replaced reply never gets treated as a source of
-        # facts about the user.
-        background_tasks.add_task(
-            self.memory_service.extract_and_store,
-            conversation_id=conversation.id,
-            user_id=user.id,
-            companion_id=companion.id,
-            user_message=request.message,
-            assistant_message=final_text,
-        )
+        # Post-response work gets fresh DB sessions inside the background task.
+        # Uses final_text (what the user actually saw), so a moderated fallback
+        # never becomes a source of apparent facts about the user.
+        if self.post_turn_processor is not None:
+            background_tasks.add_task(
+                self.post_turn_processor.process,
+                conversation_id=conversation.id,
+                user_id=user.id,
+                companion_id=companion.id,
+                user_message=request.message,
+                assistant_message=final_text,
+                source_message_id=user_message.id,
+            )
 
         return ChatResponse(
             message_id=assistant_message.id,
@@ -376,4 +387,6 @@ class ChatService:
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
             ),
+            message_type=MessageType.text.value,
+            transcript=request.message if user_message_type == MessageType.audio else None,
         )

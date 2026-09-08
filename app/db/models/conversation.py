@@ -37,7 +37,6 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     companion_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("companions.id", ondelete="RESTRICT"),
         nullable=False,
     )
 
@@ -45,7 +44,8 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Text,
         nullable=True,
         doc="Rolling conversation summary maintained by the background "
-        "summarization job (Phase 8). Null until the first summary run.",
+        "rolling summary maintained after chat turns. Null until the first "
+        "summary run.",
     )
 
     __table_args__ = (

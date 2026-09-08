@@ -53,3 +53,5 @@ class CompanionDetail(BaseModel):
     interests: list[str] = []
     aesthetic_keywords: list[str] = []
     what_you_experience: list[str] = []
+    voice_available: bool = False
+    image_available: bool = False

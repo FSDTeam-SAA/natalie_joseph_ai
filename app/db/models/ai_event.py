@@ -9,7 +9,7 @@ tokens, model, event type) — never message content.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
@@ -31,7 +31,6 @@ class AIEvent(Base, UUIDPrimaryKeyMixin):
     )
     companion_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("companions.id", ondelete="SET NULL"),
         nullable=True,
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -60,7 +59,7 @@ class AIEvent(Base, UUIDPrimaryKeyMixin):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 

@@ -11,15 +11,43 @@ pytest-asyncio creates per test function by default. Production code
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 
+_TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
+if _TEST_DATABASE_URL:
+    # Integration tests must never inherit DATABASE_URL from a developer's .env.
+    os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
+    os.environ["DATABASE_SSL_MODE"] = os.getenv("TEST_DATABASE_SSL_MODE", "disable")
+    os.environ["AUTH_MODE"] = "local_api_key"
+    os.environ["LOCAL_API_KEY"] = "integration-test-only-key"
+    # Database integration tests exercise application behavior, not Redis.
+    # Keeping this off makes the suite deterministic and prevents accidental
+    # access to a developer's configured Redis instance.
+    os.environ["ENABLE_RATE_LIMITING"] = "false"
+    get_settings.cache_clear()
+
 _settings = get_settings()
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if "tests/integration/" not in item.path.as_posix():
+            continue
+        item.add_marker(pytest.mark.integration)
+        if not _TEST_DATABASE_URL:
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="Set TEST_DATABASE_URL to an isolated migrated test database."
+                )
+            )
 
 
 @pytest_asyncio.fixture

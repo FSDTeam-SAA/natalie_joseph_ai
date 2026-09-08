@@ -17,7 +17,8 @@ import enum
 import uuid
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Enum as SAEnum, Float, ForeignKey, Index, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,7 +47,6 @@ class Memory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     companion_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("companions.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -68,20 +68,20 @@ class Memory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         String(50),
         nullable=True,
         doc="Not enumerated in the source spec — stored as an open string. "
-        "TODO-CONFIRM: define concrete privacy_class values before Phase 7 "
-        "(e.g. 'standard' vs 'sensitive') if access-control behavior should "
-        "differ by class. Left optional/undefined rather than fabricated.",
+        "No privacy taxonomy is assumed; owner/companion scoping is enforced "
+        "independently at the repository layer.",
     )
 
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("messages.id", ondelete="SET NULL"),
+        ForeignKey("messages.id", ondelete="CASCADE"),
         nullable=True,
     )
 
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     __table_args__ = (
+        UniqueConstraint("user_id", "companion_id", "key", name="uq_memory_user_companion_key"),
         Index("ix_memories_user_id", "user_id"),
         Index("ix_memories_companion_id", "companion_id"),
         Index("ix_memories_active", "active"),

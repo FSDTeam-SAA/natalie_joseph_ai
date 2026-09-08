@@ -2,9 +2,8 @@
 Integration tests for dev-mode auth, conversation endpoints, and the
 chat endpoint (Phase 5 base + Phase 7 memory wiring).
 
-OpenAI calls are mocked at the SDK boundary (same approach as Phase 4
-unit tests) since this environment has no network access to
-api.openai.com. Everything else — auth, database writes, ownership
+Provider calls are mocked at the provider boundary since integration
+tests must not call xAI or OpenAI. Everything else — auth, database writes, ownership
 checks, moderation branching, message persistence — runs for real
 against the real (schema-isolated) test database.
 
@@ -32,6 +31,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.db.session import get_db_session
+from app.llm.base import LLMUsage
 from app.main import app
 
 _settings = get_settings()
@@ -51,8 +51,8 @@ def _fake_moderation_response(flagged: bool = False):
 def _fake_generate_response(text: str):
     return SimpleNamespace(
         output_text=text,
-        usage=SimpleNamespace(input_tokens=50, output_tokens=20),
-        model="gpt-5.6-terra",
+        usage=LLMUsage(input_tokens=50, output_tokens=20),
+        model="grok-4.6",
         id=f"resp_{uuid.uuid4().hex[:8]}",
     )
 
@@ -183,6 +183,7 @@ class TestChatEndpoint:
 
         from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
+        from app.llm.xai_provider import XAIProvider
         from app.moderation.openai_moderation import OpenAIModerationProvider
 
         with (
@@ -196,13 +197,13 @@ class TestChatEndpoint:
                 ),
             ),
             patch.object(
-                OpenAIProvider,
+                XAIProvider,
                 "generate",
                 new=AsyncMock(
                     return_value=SimpleNamespace(
                         text="Hey there! My day was great, thanks for asking!",
-                        usage=SimpleNamespace(input_tokens=50, output_tokens=20),
-                        model="gpt-5.6-terra",
+                        usage=LLMUsage(input_tokens=50, output_tokens=20),
+                        model="grok-4.6",
                         raw_response_id="resp_test123",
                     )
                 ),
@@ -232,7 +233,7 @@ class TestChatEndpoint:
                 new=AsyncMock(
                     return_value=SimpleNamespace(
                         data={"memories": []},
-                        usage=SimpleNamespace(input_tokens=30, output_tokens=10),
+                        usage=LLMUsage(input_tokens=30, output_tokens=10),
                         model="gpt-5.6-luna",
                         raw_response_id="resp_extract_test",
                     )
@@ -245,6 +246,7 @@ class TestChatEndpoint:
                     "conversation_id": conversation_id,
                     "companion_id": elena_id,
                     "message": "Hey Elena, how was your day?",
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 headers=headers,
             )
@@ -293,6 +295,7 @@ class TestChatEndpoint:
                     "conversation_id": conversation_id,
                     "companion_id": elena_id,
                     "message": "this should get blocked",
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 headers=headers,
             )
@@ -326,6 +329,7 @@ class TestChatEndpoint:
                 "conversation_id": conversation_id,
                 "companion_id": luna_id,  # mismatched on purpose
                 "message": "hello",
+                "idempotency_key": str(uuid.uuid4()),
             },
             headers=headers,
         )

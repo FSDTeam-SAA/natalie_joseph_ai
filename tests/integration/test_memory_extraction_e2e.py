@@ -3,16 +3,13 @@ End-to-end Phase 7 test: does a chat request actually result in a
 persisted Memory row (via the FastAPI BackgroundTask), and does a
 later chat request actually retrieve it into the prompt?
 
-This exists specifically to verify the riskiest assumption documented
-in MemoryService's module docstring: that FastAPI/Starlette's
-yield-dependency teardown for get_db_session() really does run after
-background tasks complete, so extract_and_store() can safely reuse
-the same request-scoped session. If that assumption is ever wrong (a
-FastAPI/Starlette version change, for instance), this test is what
-would catch it — the unit tests in test_memory_service.py mock the
-session entirely and can't detect this class of failure.
+This also verifies that the post-turn processor opens an independent
+database session inside the background task. FastAPI 0.106 through
+0.117 closes yielded request dependencies before background work, so
+reusing the request session would be unsafe and this real-database test
+would catch that regression.
 
-Real Postgres+pgvector round-trip; OpenAI calls mocked at the SDK
+Real Postgres+pgvector round-trip; provider calls mocked at the SDK
 boundary, same convention as test_chat_and_conversations.py.
 """
 
@@ -33,6 +30,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import get_settings
 from app.db.models.memory import Memory
 from app.db.session import get_db_session
+from app.llm.base import LLMUsage
 from app.llm.prompts.builder import PromptBuilder
 from app.main import app
 
@@ -111,7 +109,7 @@ def _fake_extraction_with_one_memory():
                 }
             ]
         },
-        usage=SimpleNamespace(input_tokens=20, output_tokens=10),
+        usage=LLMUsage(input_tokens=20, output_tokens=10),
         model="gpt-5.6-luna",
         raw_response_id="resp_extract",
     )
@@ -120,7 +118,7 @@ def _fake_extraction_with_one_memory():
 def _fake_extraction_empty():
     return SimpleNamespace(
         data={"memories": []},
-        usage=SimpleNamespace(input_tokens=20, output_tokens=10),
+        usage=LLMUsage(input_tokens=20, output_tokens=10),
         model="gpt-5.6-luna",
         raw_response_id="resp_extract_empty",
     )
@@ -141,6 +139,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
 
         from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
+        from app.llm.xai_provider import XAIProvider
         from app.moderation.openai_moderation import OpenAIModerationProvider
 
         # --- Turn 1: mention the dog. Extraction should store a memory. ---
@@ -153,13 +152,13 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                 ),
             ),
             patch.object(
-                OpenAIProvider,
+                XAIProvider,
                 "generate",
                 new=AsyncMock(
                     return_value=SimpleNamespace(
                         text="Rex sounds adorable! Tell me more about him.",
-                        usage=SimpleNamespace(input_tokens=50, output_tokens=20),
-                        model="gpt-5.6-terra",
+                        usage=LLMUsage(input_tokens=50, output_tokens=20),
+                        model="grok-4.6",
                         raw_response_id="resp_turn1",
                     )
                 ),
@@ -179,6 +178,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                     "conversation_id": conversation_id,
                     "companion_id": elena_id,
                     "message": "My dog's name is Rex.",
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 headers=headers,
             )
@@ -207,8 +207,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
         stored = result.scalar_one_or_none()
         assert stored is not None, (
             "No Memory row found after chat request completed -- the "
-            "BackgroundTask + session-reuse assumption documented in "
-            "MemoryService may not hold in this FastAPI/Starlette version."
+            "BackgroundTask did not persist its independent transaction."
         )
         assert stored.value == "User has a dog named Rex"
         assert stored.confidence == 0.9
@@ -233,13 +232,13 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                 ),
             ),
             patch.object(
-                OpenAIProvider,
+                XAIProvider,
                 "generate",
                 new=AsyncMock(
                     return_value=SimpleNamespace(
                         text="Sure, happy to chat!",
-                        usage=SimpleNamespace(input_tokens=40, output_tokens=15),
-                        model="gpt-5.6-terra",
+                        usage=LLMUsage(input_tokens=40, output_tokens=15),
+                        model="grok-4.6",
                         raw_response_id="resp_turn2",
                     )
                 ),
@@ -260,6 +259,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                     "conversation_id": conversation_id,
                     "companion_id": elena_id,
                     "message": "What should I do this weekend?",
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 headers=headers,
             )
@@ -282,6 +282,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
 
         from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
+        from app.llm.xai_provider import XAIProvider
         from app.moderation.openai_moderation import OpenAIModerationProvider
 
         def _common_patches():
@@ -296,13 +297,13 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                     ),
                 ),
                 patch.object(
-                    OpenAIProvider,
+                    XAIProvider,
                     "generate",
                     new=AsyncMock(
                         return_value=SimpleNamespace(
                             text="Got it!",
-                            usage=SimpleNamespace(input_tokens=30, output_tokens=10),
-                            model="gpt-5.6-terra",
+                            usage=LLMUsage(input_tokens=30, output_tokens=10),
+                            model="grok-4.6",
                             raw_response_id="resp",
                         )
                     ),
@@ -330,6 +331,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                     "conversation_id": conversation_id,
                     "companion_id": elena_id,
                     "message": "My dog's name is Rex.",
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 headers=headers,
             )
@@ -345,7 +347,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                     }
                 ]
             },
-            usage=SimpleNamespace(input_tokens=20, output_tokens=10),
+            usage=LLMUsage(input_tokens=20, output_tokens=10),
             model="gpt-5.6-luna",
             raw_response_id="resp_extract_update",
         )
@@ -354,7 +356,9 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                 stack.enter_context(p)
             stack.enter_context(
                 patch.object(
-                    OpenAIProvider, "generate_structured", new=AsyncMock(return_value=updated_extraction)
+                    OpenAIProvider,
+                    "generate_structured",
+                    new=AsyncMock(return_value=updated_extraction),
                 )
             )
             await async_client.post(
@@ -363,6 +367,7 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
                     "conversation_id": conversation_id,
                     "companion_id": elena_id,
                     "message": "Rex just turned 2!",
+                    "idempotency_key": str(uuid.uuid4()),
                 },
                 headers=headers,
             )
@@ -384,6 +389,8 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
             )
         )
         rows = result.scalars().all()
-        assert len(rows) == 1, "Expected the existing 'pet_name' memory to be updated, not duplicated"
+        assert len(rows) == 1, (
+            "Expected the existing 'pet_name' memory to be updated, not duplicated"
+        )
         assert rows[0].value == "User's dog Rex just turned 2 years old"
         assert rows[0].confidence == 0.95

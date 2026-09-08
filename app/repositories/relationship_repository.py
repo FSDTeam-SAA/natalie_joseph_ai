@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.db.models.relationship_context import RelationshipContext
 from app.repositories.base_repository import BaseRepository
@@ -25,6 +26,19 @@ class RelationshipRepository(BaseRepository[RelationshipContext]):
     async def get_or_create(
         self, user_id: uuid.UUID, companion_id: uuid.UUID
     ) -> RelationshipContext:
+        existing = await self.get_for_user_and_companion(user_id, companion_id)
+        if existing is not None:
+            return existing
+
+        digest = hashlib.blake2b(
+            f"{user_id}:{companion_id}".encode(), digest_size=8
+        ).digest()
+        lock_key = int.from_bytes(digest, byteorder="big", signed=True)
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+        # Another transaction may have created the row while this request waited.
         existing = await self.get_for_user_and_companion(user_id, companion_id)
         if existing is not None:
             return existing

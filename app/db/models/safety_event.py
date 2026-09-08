@@ -6,17 +6,17 @@ safety_events table (spec Section 26, 47: moderation audit trail).
 (harassment, hate, self-harm, etc. as moderation categories; some
 action taken) but no fixed value set is given in the source documents,
 so they are stored as open strings rather than invented enums —
-the concrete taxonomy should be defined alongside `safety_policy.json`
-in Phase 9, not guessed here.
+the provider taxonomy remains open rather than being guessed here.
 """
 
 from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Index, String
+from sqlalchemy import DateTime, ForeignKey, Index, String
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,25 +56,23 @@ class SafetyEvent(Base, UUIDPrimaryKeyMixin):
     category: Mapped[str | None] = mapped_column(
         String(100),
         nullable=True,
-        doc="Open string — concrete taxonomy (harassment, hate, self_harm, "
-        "prompt_injection, etc.) defined in Phase 9 safety_policy.json, not here.",
+        doc="Open string for the provider's category taxonomy (for example "
+        "harassment, hate, self_harm, or prompt_injection).",
     )
     severity: Mapped[str | None] = mapped_column(
         String(20),
         nullable=True,
-        doc="Not enumerated in spec — TODO-CONFIRM scale (e.g. low/medium/high) "
-        "in Phase 9 rather than assumed.",
+        doc="Optional provider-specific severity scale; no invented enum is imposed.",
     )
     action: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
-        doc="Not enumerated in spec — e.g. 'blocked', 'allowed', 'flagged'. "
-        "TODO-CONFIRM concrete action set in Phase 9.",
+        doc="Open action value such as 'blocked', 'allowed', or 'flagged'.",
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 

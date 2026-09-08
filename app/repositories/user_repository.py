@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from app.db.models.user import User
 from app.repositories.base_repository import BaseRepository
@@ -33,5 +34,24 @@ class UserRepository(BaseRepository[User]):
         if existing is not None:
             return existing
 
-        user = User(external_user_id=external_user_id, locale=locale, timezone=timezone)
-        return await self.add(user)
+        statement = (
+            insert(User)
+            .values(
+                external_user_id=external_user_id,
+                locale=locale,
+                timezone=timezone,
+            )
+            .on_conflict_do_nothing(index_elements=[User.external_user_id])
+            .returning(User)
+        )
+        result = await self.session.execute(statement)
+        created = result.scalar_one_or_none()
+        if created is not None:
+            return created
+
+        # Another worker won the first-contact race. PostgreSQL waits for that
+        # transaction at the unique index, so the committed row is now visible.
+        existing = await self.get_by_external_user_id(external_user_id)
+        if existing is None:  # defensive: the unique row should always be visible
+            raise RuntimeError("User provisioning conflict did not resolve.")
+        return existing

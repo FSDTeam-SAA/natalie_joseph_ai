@@ -15,15 +15,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from openai import AsyncOpenAI, APIError
+from openai import APIError, AsyncOpenAI
 
 from app.core.exceptions import ProviderError, ValidationError
 from app.moderation.base import ModerationProvider, ModerationResult
 
 
 class OpenAIModerationProvider(ModerationProvider):
-    def __init__(self, api_key: str) -> None:
-        self._client = AsyncOpenAI(api_key=api_key)
+    def __init__(
+        self, api_key: str, *, timeout_seconds: float = 45.0, max_retries: int = 2
+    ) -> None:
+        self._client = AsyncOpenAI(
+            api_key=api_key, timeout=timeout_seconds, max_retries=max_retries
+        )
 
     @staticmethod
     def _to_result(raw: Any) -> ModerationResult:
@@ -39,7 +43,7 @@ class OpenAIModerationProvider(ModerationProvider):
         try:
             response = await self._client.moderations.create(input=text, model=model)
         except APIError as exc:
-            raise ProviderError(f"OpenAI moderate_text() failed: {exc}") from exc
+            raise ProviderError("OpenAI text moderation failed.") from exc
 
         return self._to_result(response)
 
@@ -60,6 +64,6 @@ class OpenAIModerationProvider(ModerationProvider):
         try:
             response = await self._client.moderations.create(input=input_items, model=model)
         except APIError as exc:
-            raise ProviderError(f"OpenAI moderate_multimodal() failed: {exc}") from exc
+            raise ProviderError("OpenAI multimodal moderation failed.") from exc
 
         return self._to_result(response)

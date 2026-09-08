@@ -44,7 +44,6 @@ class RelationshipContext(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     companion_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("companions.id", ondelete="CASCADE"),
         nullable=False,
     )
 

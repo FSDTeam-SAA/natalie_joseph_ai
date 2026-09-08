@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import random
 import uuid
+from datetime import UTC
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.companion import Companion
@@ -205,8 +205,8 @@ async def test_memory_deactivate_excludes_from_search(db: AsyncSession) -> None:
     user = await user_repo.get_or_create_by_external_user_id(uuid.uuid4())
     companion = await companion_repo.add(
         Companion(
-            slug=f"test-anastacia-{uuid.uuid4().hex[:8]}",
-            name="Anastacia",
+            slug=f"test-lina-{uuid.uuid4().hex[:8]}",
+            name="Lina",
             version=1,
             personality_config={},
             communication_config={},
@@ -274,7 +274,7 @@ async def test_message_ordering_survives_identical_timestamps(db: AsyncSession) 
     reproducing the exact failure condition — and confirms ordering by
     `sequence` still returns correct chronological order regardless.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.db.models.companion import Companion
     from app.db.models.conversation import Conversation
@@ -300,7 +300,7 @@ async def test_message_ordering_survives_identical_timestamps(db: AsyncSession) 
     )
     conversation = await conv_repo.add(Conversation(user_id=user.id, companion_id=companion.id))
 
-    identical_timestamp = datetime.now(timezone.utc)
+    identical_timestamp = datetime.now(UTC)
 
     # Insert assistant FIRST but with the exact same timestamp as the
     # user message inserted second — if ordering relied on created_at

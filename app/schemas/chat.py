@@ -25,11 +25,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.media import MediaDescriptor
+
 
 class ChatRequest(BaseModel):
     conversation_id: uuid.UUID
     companion_id: uuid.UUID
     message: str = Field(min_length=1, max_length=4000)
+    idempotency_key: uuid.UUID
 
 
 class ChatUsage(BaseModel):
@@ -44,3 +47,6 @@ class ChatResponse(BaseModel):
     response: str
     created_at: datetime
     usage: ChatUsage
+    message_type: str = "text"
+    media: MediaDescriptor | None = None
+    transcript: str | None = None

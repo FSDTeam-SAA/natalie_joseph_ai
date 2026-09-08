@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from app.db.models.memory import MemoryType
+from app.llm.base import LLMUsage
 from app.services.memory_service import MemoryService, _cosine_similarity
 
 
@@ -24,6 +25,8 @@ def _fake_settings(**overrides) -> SimpleNamespace:
         OPENAI_BACKGROUND_MODEL="gpt-5.6-luna",
         MEMORY_TOP_K=5,
         MEMORY_MIN_SCORE=0.75,
+        MEMORY_MIN_CONFIDENCE=0.6,
+        PROMPT_VERSION="test-v1",
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -39,7 +42,11 @@ def _make_service(**overrides) -> tuple[MemoryService, dict]:
         embedding_provider=AsyncMock(),
         llm_provider=AsyncMock(),
     )
-    mocks["memory_repo"].session = AsyncMock()
+    mocks["memory_repo"].session = SimpleNamespace(
+        add=Mock(),
+        commit=AsyncMock(),
+        flush=AsyncMock(),
+    )
     mocks.update(overrides)
     service = MemoryService(settings=_fake_settings(), **mocks)
     return service, mocks
@@ -88,6 +95,7 @@ class TestRetrieveRelevant:
         assert kwargs["user_id"] == user_id
         assert kwargs["companion_id"] == companion_id
         assert kwargs["top_k"] == 5
+        assert kwargs["min_confidence"] == 0.6
 
     async def test_embedding_failure_degrades_to_empty_list(self) -> None:
         service, mocks = _make_service()
@@ -125,7 +133,7 @@ class TestExtractAndStore:
                     }
                 ]
             },
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            usage=LLMUsage(input_tokens=10, output_tokens=5),
             model="gpt-5.6-luna",
             raw_response_id="resp_1",
         )
@@ -164,7 +172,7 @@ class TestExtractAndStore:
                     }
                 ]
             },
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            usage=LLMUsage(input_tokens=10, output_tokens=5),
             model="gpt-5.6-luna",
             raw_response_id="resp_2",
         )
@@ -173,7 +181,7 @@ class TestExtractAndStore:
         )
         existing = SimpleNamespace(
             key="pet_name", value="old value", memory_type=MemoryType.fact,
-            confidence=0.5, embedding=[0.0] * 3,
+            confidence=0.5, embedding=[0.0] * 3, active=False,
         )
         mocks["memory_repo"].find_existing_by_key.return_value = existing
 
@@ -188,6 +196,8 @@ class TestExtractAndStore:
         mocks["memory_repo"].add.assert_not_awaited()
         assert existing.value == "User's dog Rex is now 2 years old"
         assert existing.confidence == 0.95
+        assert existing.active is True
+        mocks["memory_repo"].acquire_key_lock.assert_awaited_once()
         mocks["memory_repo"].session.flush.assert_awaited_once()
         mocks["memory_repo"].session.commit.assert_awaited_once()
 
@@ -195,7 +205,7 @@ class TestExtractAndStore:
         service, mocks = _make_service()
         mocks["llm_provider"].generate_structured.return_value = SimpleNamespace(
             data={"memories": []},
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            usage=LLMUsage(input_tokens=10, output_tokens=5),
             model="gpt-5.6-luna",
             raw_response_id="resp_3",
         )
@@ -215,7 +225,7 @@ class TestExtractAndStore:
         service, mocks = _make_service()
         mocks["llm_provider"].generate_structured.return_value = SimpleNamespace(
             data={"memories": [{"key": "missing_required_fields"}]},
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            usage=LLMUsage(input_tokens=10, output_tokens=5),
             model="gpt-5.6-luna",
             raw_response_id="resp_4",
         )
@@ -258,7 +268,7 @@ class TestExtractAndStore:
                     }
                 ]
             },
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            usage=LLMUsage(input_tokens=10, output_tokens=5),
             model="gpt-5.6-luna",
             raw_response_id="resp_5",
         )

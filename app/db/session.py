@@ -32,6 +32,7 @@ engine: AsyncEngine = create_async_engine(
     max_overflow=_settings.DATABASE_MAX_OVERFLOW,
     pool_pre_ping=True,
     echo=False,
+    hide_parameters=True,
     connect_args=_connect_args,
 )
 

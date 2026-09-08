@@ -65,6 +65,14 @@
       "Gold details", "Beach clubs", "Champagne brunches", "Elegant cafés",
       "Modern glamour", "Feminine energy"
     ],
-    "note": "Aesthetic/style keywords sourced directly from the spec document. No physical appearance details (hair, eye color, body type, etc.) are fabricated beyond what the source document states in text form; reference imagery exists in the source spec but is not transcribed into structured fields here to avoid inventing descriptive claims not explicitly given in writing."
+    "note": "Aesthetic/style keywords sourced directly from the spec document. No physical appearance details (hair, eye color, body type, etc.) are fabricated beyond what the source document states in text form; reference imagery exists in the source spec but is not transcribed into structured fields here to avoid inventing descriptive claims not explicitly given in writing.",
+    "reference_images": [],
+    "physical_identity": "",
+    "generation_instructions": "Keep Elena's confident, elegant Dubai visual aesthetic consistent with the approved reference image."
+  },
+  "voice": {
+    "provider": "elevenlabs",
+    "voice_id": null,
+    "settings": {"stability": 0.5, "similarity_boost": 0.8, "style": 0.3, "use_speaker_boost": true, "speed": 1.0}
   }
 }

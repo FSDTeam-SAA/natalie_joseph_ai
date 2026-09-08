@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
-from sqlalchemy import pool
 import sqlalchemy as sa
+from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from alembic import context
 from app.core.config import get_settings
 from app.db.base import ELYSIA_SCHEMA, Base
 
@@ -18,10 +18,12 @@ from app.db.models import (  # noqa: F401
     AIEvent,
     Companion,
     Conversation,
+    MediaAsset,
     Memory,
     Message,
     RelationshipContext,
     SafetyEvent,
+    StoryEvent,
     User,
 )
 
@@ -47,6 +49,7 @@ def run_migrations_offline() -> None:
         include_schemas=True,
     )
     with context.begin_transaction():
+        context.execute(sa.text(f"CREATE SCHEMA IF NOT EXISTS {ELYSIA_SCHEMA}"))
         context.run_migrations()
 
 

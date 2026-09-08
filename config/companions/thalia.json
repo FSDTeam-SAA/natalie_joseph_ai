@@ -69,6 +69,14 @@
       "Neutral tones", "Gold details", "Fitness fashion", "Healthy food",
       "Beach clubs", "Sunrise workouts", "Elegant femininity"
     ],
-    "note": "Aesthetic/style keywords sourced directly from the spec document. No physical appearance details are fabricated beyond what the source document states in text form."
+    "note": "Aesthetic/style keywords sourced directly from the spec document. No physical appearance details are fabricated beyond what the source document states in text form.",
+    "reference_images": [],
+    "physical_identity": "",
+    "generation_instructions": "Keep Thalia's confident, wellness-focused Dubai visual aesthetic consistent with the approved reference image."
+  },
+  "voice": {
+    "provider": "elevenlabs",
+    "voice_id": null,
+    "settings": {"stability": 0.48, "similarity_boost": 0.82, "style": 0.3, "use_speaker_boost": true, "speed": 1.0}
   }
 }

@@ -15,21 +15,25 @@ that; it fails naturally when pgvector rejects the mismatched size.
 
 from __future__ import annotations
 
-from openai import AsyncOpenAI, APIError
+from openai import APIError, AsyncOpenAI
 
 from app.core.exceptions import ProviderError
 from app.embeddings.base import EmbeddingProvider, EmbeddingResult
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, api_key: str) -> None:
-        self._client = AsyncOpenAI(api_key=api_key)
+    def __init__(
+        self, api_key: str, *, timeout_seconds: float = 45.0, max_retries: int = 2
+    ) -> None:
+        self._client = AsyncOpenAI(
+            api_key=api_key, timeout=timeout_seconds, max_retries=max_retries
+        )
 
     async def embed_text(self, text: str, *, model: str) -> EmbeddingResult:
         try:
             response = await self._client.embeddings.create(input=text, model=model)
         except APIError as exc:
-            raise ProviderError(f"OpenAI embed_text() failed: {exc}") from exc
+            raise ProviderError("OpenAI embedding request failed.") from exc
 
         embedding = response.data[0].embedding
         return EmbeddingResult(

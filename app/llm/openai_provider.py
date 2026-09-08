@@ -21,15 +21,19 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai import AsyncOpenAI, APIError
+from openai import APIError, AsyncOpenAI
 
 from app.core.exceptions import ProviderError
 from app.llm.base import LLMMessage, LLMProvider, LLMResult, LLMStructuredResult, LLMUsage
 
 
 class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key: str) -> None:
-        self._client = AsyncOpenAI(api_key=api_key)
+    def __init__(
+        self, api_key: str, *, timeout_seconds: float = 45.0, max_retries: int = 2
+    ) -> None:
+        self._client = AsyncOpenAI(
+            api_key=api_key, timeout=timeout_seconds, max_retries=max_retries
+        )
 
     @staticmethod
     def _to_input(messages: list[LLMMessage]) -> list[dict[str, str]]:
@@ -42,6 +46,8 @@ class OpenAIProvider(LLMProvider):
         model: str,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        cache_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResult:
         try:
             kwargs: dict[str, Any] = {"model": model, "input": self._to_input(messages)}
@@ -49,16 +55,38 @@ class OpenAIProvider(LLMProvider):
                 kwargs["temperature"] = temperature
             if max_output_tokens is not None:
                 kwargs["max_output_tokens"] = max_output_tokens
+            if cache_key is not None:
+                kwargs["prompt_cache_key"] = cache_key
+            if reasoning_effort is not None:
+                kwargs["reasoning"] = {"effort": reasoning_effort}
 
             response = await self._client.responses.create(**kwargs)
         except APIError as exc:
-            raise ProviderError(f"OpenAI generate() failed: {exc}") from exc
+            raise ProviderError("OpenAI generation failed.") from exc
 
         return LLMResult(
             text=response.output_text,
             usage=LLMUsage(
                 input_tokens=response.usage.input_tokens if response.usage else 0,
                 output_tokens=response.usage.output_tokens if response.usage else 0,
+                cached_input_tokens=(
+                    getattr(
+                        getattr(response.usage, "input_tokens_details", None),
+                        "cached_tokens",
+                        0,
+                    )
+                    if response.usage
+                    else 0
+                ),
+                reasoning_tokens=(
+                    getattr(
+                        getattr(response.usage, "output_tokens_details", None),
+                        "reasoning_tokens",
+                        0,
+                    )
+                    if response.usage
+                    else 0
+                ),
             ),
             model=response.model,
             raw_response_id=response.id,
@@ -71,6 +99,8 @@ class OpenAIProvider(LLMProvider):
         model: str,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        cache_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[str]:
         try:
             kwargs: dict[str, Any] = {
@@ -82,6 +112,10 @@ class OpenAIProvider(LLMProvider):
                 kwargs["temperature"] = temperature
             if max_output_tokens is not None:
                 kwargs["max_output_tokens"] = max_output_tokens
+            if cache_key is not None:
+                kwargs["prompt_cache_key"] = cache_key
+            if reasoning_effort is not None:
+                kwargs["reasoning"] = {"effort": reasoning_effort}
 
             stream = await self._client.responses.create(**kwargs)
 
@@ -94,7 +128,7 @@ class OpenAIProvider(LLMProvider):
                     if delta:
                         yield delta
         except APIError as exc:
-            raise ProviderError(f"OpenAI generate_stream() failed: {exc}") from exc
+            raise ProviderError("OpenAI streaming generation failed.") from exc
 
     async def generate_structured(
         self,
@@ -123,13 +157,13 @@ class OpenAIProvider(LLMProvider):
 
             response = await self._client.responses.create(**kwargs)
         except APIError as exc:
-            raise ProviderError(f"OpenAI generate_structured() failed: {exc}") from exc
+            raise ProviderError("OpenAI structured generation failed.") from exc
 
         try:
             data = json.loads(response.output_text)
         except (json.JSONDecodeError, TypeError) as exc:
             raise ProviderError(
-                f"OpenAI generate_structured() returned non-JSON output: {exc}"
+                "OpenAI structured generation returned invalid JSON."
             ) from exc
 
         return LLMStructuredResult(
@@ -137,6 +171,24 @@ class OpenAIProvider(LLMProvider):
             usage=LLMUsage(
                 input_tokens=response.usage.input_tokens if response.usage else 0,
                 output_tokens=response.usage.output_tokens if response.usage else 0,
+                cached_input_tokens=(
+                    getattr(
+                        getattr(response.usage, "input_tokens_details", None),
+                        "cached_tokens",
+                        0,
+                    )
+                    if response.usage
+                    else 0
+                ),
+                reasoning_tokens=(
+                    getattr(
+                        getattr(response.usage, "output_tokens_details", None),
+                        "reasoning_tokens",
+                        0,
+                    )
+                    if response.usage
+                    else 0
+                ),
             ),
             model=response.model,
             raw_response_id=response.id,

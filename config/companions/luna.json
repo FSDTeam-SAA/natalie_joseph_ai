@@ -61,6 +61,14 @@
       "Soft colors", "Natural light", "Scandinavian interiors", "Morning coffee",
       "Cozy evenings", "Fitness", "Nature", "Calm routines", "Everyday beauty"
     ],
-    "note": "Aesthetic/style keywords sourced directly from the spec document. No physical appearance details are fabricated beyond what the source document states in text form."
+    "note": "Aesthetic/style keywords sourced directly from the spec document. No physical appearance details are fabricated beyond what the source document states in text form.",
+    "reference_images": [],
+    "physical_identity": "",
+    "generation_instructions": "Keep Luna's calm, natural Scandinavian visual aesthetic consistent with the approved reference image."
+  },
+  "voice": {
+    "provider": "elevenlabs",
+    "voice_id": null,
+    "settings": {"stability": 0.6, "similarity_boost": 0.8, "style": 0.2, "use_speaker_boost": true, "speed": 1.0}
   }
 }

@@ -1,48 +1,27 @@
-"""
-Authentication abstraction.
+"""Fail-closed authentication and backend-supplied AI authorization context.
 
-STATUS:
-  - JWT verification: IMPLEMENTED (JWTAuthProvider) based on the
-    backend team's actual NestJS login source, confirmed 2026-08-29.
-    Two things still fail closed pending backend follow-up — see the
-    "STILL OPEN" list in app/core/config.py's Auth section:
-      - adult_eligible: no such claim exists in their tokens yet, so
-        every user is treated as NOT adult-eligible until they add it
-      - entitled: same — defaults to False until added
-  - Local API key mode (dev/testing only): IMPLEMENTED
-    (LocalAPIKeyAuthProvider) — still useful for testing flows that
-    need adult_eligible=True before the backend adds that claim, since
-    JWTAuthProvider cannot produce that today no matter what token you
-    give it.
-
-Confirmed from backend team's NestJS source (2026-08-29):
-  - Algorithm: HS256 (implied — jwtService.sign() with a plain secret
-    and no `algorithm` option)
-  - User ID claim: "id"
-  - No `iss`/`aud` claims are set — not verified here since none exist
-  - Secret: their ACCESS_TOKEN_SECRET value, set as JWT_SECRET
-
-Still open (not guessed — see config.py for full detail):
-  - Exact type/format of `user.id` from their Prisma schema (UUID?
-    cuid? autoincrement int?) — JWTAuthProvider currently requires it
-    to parse as a UUID and raises a clear AuthenticationError if not,
-    rather than silently coercing or guessing a conversion.
-  - adult_eligible / entitled claims — absent from their tokens today.
+The recommended production path is a private service-to-service bearer token:
+the main backend authenticates the end user and supplies its age, entitlement,
+and feature decisions. Direct JWT verification remains available for deployments
+whose tokens already contain the complete decision contract. A development-only
+API key mode supports isolated local testing.
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt as jose_jwt
+from jose import JWTError
+from jose import jwt as jose_jwt
 
 from app.core.config import AppEnv, AuthMode, Settings, get_settings
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, AuthorizationError
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +52,47 @@ class AuthContext:
     adult_eligible: bool
     entitled: bool
     raw_claims: dict
+    features: frozenset[str] | None = None
+
+    def allows(self, feature: str) -> bool:
+        """Apply a decision made by the external backend.
+
+        A populated feature set is authoritative and least-privilege. The
+        legacy `entitled` boolean remains a compatibility fallback until the
+        backend starts sending feature-scoped grants.
+        """
+        if self.features is not None:
+            return feature in self.features
+        return self.entitled
+
+
+def require_feature(auth: AuthContext, feature: str) -> None:
+    if not auth.allows(feature):
+        raise AuthorizationError(
+            f"The trusted backend did not authorize the '{feature}' AI feature."
+        )
+
+
+def require_trusted_backend(auth: AuthContext) -> None:
+    """Restrict orchestration/scheduling routes to service-to-service calls."""
+    if auth.raw_claims.get("source") != "trusted_backend":
+        raise AuthorizationError("This operation may only be initiated by the trusted backend.")
+
+
+def _strict_bool(value: object, *, claim_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if type(value) is not bool:
+        raise AuthenticationError(f"The '{claim_name}' claim must be a JSON boolean.")
+    return value
+
+
+def _feature_set(value: object, *, claim_name: str) -> frozenset[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise AuthenticationError(f"The '{claim_name}' claim must be an array of strings.")
+    return frozenset(item.strip() for item in value if item.strip())
 
 
 class AuthProvider(ABC):
@@ -98,13 +118,7 @@ class AuthProvider(ABC):
 
 
 class NotConfiguredAuthProvider(AuthProvider):
-    """
-    Placeholder provider for auth modes with no implementation yet
-    (currently: internal_service_token). Always raises — this
-    intentionally blocks any request from being treated as
-    authenticated so the service fails closed rather than silently
-    trusting unverified input.
-    """
+    """Defensive fallback for an unsupported auth mode; always fails closed."""
 
     async def authenticate(self, headers: dict[str, str]) -> AuthContext:
         raise AuthenticationError(
@@ -146,13 +160,18 @@ class JWTAuthProvider(AuthProvider):
         token = authorization.removeprefix("Bearer ").strip()
 
         try:
+            decode_options = {
+                "require_exp": self._settings.JWT_REQUIRE_EXP,
+                "verify_aud": bool(self._settings.JWT_AUDIENCE),
+                "verify_iss": bool(self._settings.JWT_ISSUER),
+            }
             claims = jose_jwt.decode(
                 token,
                 self._settings.JWT_SECRET,
                 algorithms=[self._settings.JWT_ALGORITHM],
-                # No issuer/audience verification: the backend's token
-                # issuance code does not set iss/aud claims, so there is
-                # nothing to check them against (confirmed 2026-08-29).
+                audience=self._settings.JWT_AUDIENCE or None,
+                issuer=self._settings.JWT_ISSUER or None,
+                options=decode_options,
             )
         except JWTError as exc:
             raise AuthenticationError(f"Invalid or expired token: {exc}") from exc
@@ -188,9 +207,19 @@ class JWTAuthProvider(AuthProvider):
 
         return AuthContext(
             user_id=user_id,
-            adult_eligible=bool(adult_eligible_raw) if adult_eligible_raw is not None else False,
-            entitled=bool(entitled_raw) if entitled_raw is not None else False,
+            adult_eligible=_strict_bool(
+                adult_eligible_raw,
+                claim_name=self._settings.JWT_ADULT_ELIGIBLE_CLAIM,
+            ),
+            entitled=_strict_bool(
+                entitled_raw,
+                claim_name=self._settings.JWT_ENTITLED_CLAIM,
+            ),
             raw_claims=claims,
+            features=_feature_set(
+                claims.get(self._settings.JWT_AI_FEATURES_CLAIM),
+                claim_name=self._settings.JWT_AI_FEATURES_CLAIM,
+            ),
         )
 
 
@@ -224,7 +253,7 @@ class LocalAPIKeyAuthProvider(AuthProvider):
         if settings.APP_ENV == AppEnv.production:
             raise RuntimeError(
                 "LocalAPIKeyAuthProvider must never be used when APP_ENV=production. "
-                "Set AUTH_MODE=jwt for production deployments."
+                "Use internal_service_token or jwt for production deployments."
             )
         if not settings.LOCAL_API_KEY:
             raise RuntimeError(
@@ -238,12 +267,16 @@ class LocalAPIKeyAuthProvider(AuthProvider):
             raise AuthenticationError("Missing or malformed Authorization header.")
 
         provided_key = authorization.removeprefix("Bearer ").strip()
-        if provided_key != self._settings.LOCAL_API_KEY:
+        if not secrets.compare_digest(provided_key, self._settings.LOCAL_API_KEY):
             raise AuthenticationError("Invalid API key.")
 
         debug_user_id_header = headers.get("x-debug-user-id")
         try:
-            user_id = UUID(debug_user_id_header) if debug_user_id_header else self._DEFAULT_TEST_USER_ID
+            user_id = (
+                UUID(debug_user_id_header)
+                if debug_user_id_header
+                else self._DEFAULT_TEST_USER_ID
+            )
         except ValueError as exc:
             raise AuthenticationError("X-Debug-User-Id must be a valid UUID.") from exc
 
@@ -255,7 +288,84 @@ class LocalAPIKeyAuthProvider(AuthProvider):
             adult_eligible=adult_eligible,
             entitled=entitled,
             raw_claims={"source": "local_api_key_dev_mode"},
+            features=(
+                frozenset(
+                    feature.strip()
+                    for feature in headers["x-debug-ai-features"].split(",")
+                    if feature.strip()
+                )
+                if "x-debug-ai-features" in headers
+                else None
+            ),
         )
+
+
+class InternalServiceTokenAuthProvider(AuthProvider):
+    """Authenticate the trusted main backend, which supplies user decisions.
+
+    This mode intentionally does not reproduce end-user login or billing. The
+    main backend authenticates the user and computes access, then calls this
+    private service with a shared service credential and explicit user/scopes.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        if not settings.INTERNAL_SERVICE_TOKEN:
+            raise RuntimeError(
+                "AUTH_MODE=internal_service_token but INTERNAL_SERVICE_TOKEN is not set."
+            )
+        self._settings = settings
+
+    async def authenticate(self, headers: dict[str, str]) -> AuthContext:
+        authorization = headers.get("authorization")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise AuthenticationError("Missing or malformed Authorization header.")
+        provided = authorization.removeprefix("Bearer ").strip()
+        if not secrets.compare_digest(provided, self._settings.INTERNAL_SERVICE_TOKEN):
+            raise AuthenticationError("Invalid internal service credential.")
+
+        raw_user_id = headers.get("x-backend-user-id")
+        if not raw_user_id:
+            raise AuthenticationError("Missing X-Backend-User-Id header.")
+        try:
+            user_id = UUID(raw_user_id)
+        except ValueError as exc:
+            raise AuthenticationError("X-Backend-User-Id must be a valid UUID.") from exc
+
+        adult = _strict_bool_header(
+            headers.get("x-backend-adult-eligible"),
+            header_name="X-Backend-Adult-Eligible",
+        )
+        entitled = _strict_bool_header(
+            headers.get("x-backend-entitled"),
+            header_name="X-Backend-Entitled",
+        )
+        features = (
+            frozenset(
+                feature.strip()
+                for feature in headers["x-backend-ai-features"].split(",")
+                if feature.strip()
+            )
+            if "x-backend-ai-features" in headers
+            else None
+        )
+        return AuthContext(
+            user_id=user_id,
+            adult_eligible=adult,
+            entitled=entitled,
+            features=features,
+            raw_claims={"source": "trusted_backend"},
+        )
+
+
+def _strict_bool_header(value: str | None, *, header_name: str) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise AuthenticationError(f"{header_name} must be 'true' or 'false'.")
 
 
 def get_auth_provider(settings: Settings = Depends(get_settings)) -> AuthProvider:
@@ -263,8 +373,8 @@ def get_auth_provider(settings: Settings = Depends(get_settings)) -> AuthProvide
         return LocalAPIKeyAuthProvider(settings)
     if settings.AUTH_MODE == AuthMode.jwt:
         return JWTAuthProvider(settings)
-    # internal_service_token falls back to the fail-closed placeholder
-    # until implemented.
+    if settings.AUTH_MODE == AuthMode.internal_service_token:
+        return InternalServiceTokenAuthProvider(settings)
     return NotConfiguredAuthProvider()
 
 
@@ -273,6 +383,11 @@ async def get_current_auth_context(
     x_debug_user_id: str | None = Header(default=None),
     x_debug_adult_eligible: str | None = Header(default=None),
     x_debug_entitled: str | None = Header(default=None),
+    x_debug_ai_features: str | None = Header(default=None),
+    x_backend_user_id: str | None = Header(default=None),
+    x_backend_adult_eligible: str | None = Header(default=None),
+    x_backend_entitled: str | None = Header(default=None),
+    x_backend_ai_features: str | None = Header(default=None),
     auth_provider: AuthProvider = Depends(get_auth_provider),
 ) -> AuthContext:
     """
@@ -293,46 +408,15 @@ async def get_current_auth_context(
         headers["x-debug-adult-eligible"] = x_debug_adult_eligible
     if x_debug_entitled is not None:
         headers["x-debug-entitled"] = x_debug_entitled
+    if x_debug_ai_features is not None:
+        headers["x-debug-ai-features"] = x_debug_ai_features
+    if x_backend_user_id is not None:
+        headers["x-backend-user-id"] = x_backend_user_id
+    if x_backend_adult_eligible is not None:
+        headers["x-backend-adult-eligible"] = x_backend_adult_eligible
+    if x_backend_entitled is not None:
+        headers["x-backend-entitled"] = x_backend_entitled
+    if x_backend_ai_features is not None:
+        headers["x-backend-ai-features"] = x_backend_ai_features
 
     return await auth_provider.authenticate(headers)
-
-
-# ============================================================================
-# STATUS AS OF 2026-08-29 — what's real vs. still pending
-# ============================================================================
-#
-# JWTAuthProvider above is REAL and will correctly verify signatures,
-# reject expired/tampered tokens, and extract user_id from any token
-# actually issued by the backend's login service shown to us.
-#
-# Two things still block full production behavior — both fail closed,
-# not fabricated:
-#
-#   1. adult_eligible / entitled claims don't exist in their tokens
-#      yet. Every authenticated user is currently treated as
-#      NOT adult-eligible and NOT entitled, regardless of their real
-#      status, until the backend team adds these claims to their
-#      jwtService.sign() payload.
-#
-#   2. `user.id` format is unconfirmed. JWTAuthProvider requires it to
-#      parse as a UUID and raises a clear, descriptive
-#      AuthenticationError if it doesn't — it does not silently coerce
-#      or guess. If real tokens start failing with that error, the
-#      fix is either (a) get the backend team to confirm/adjust their
-#      ID format, or (b) if their IDs are genuinely not UUIDs (e.g.
-#      autoincrement integers), change `users.external_user_id` in
-#      this service's schema from UUID to a plain string type — that
-#      would need a migration, not just a config change.
-#
-# TO ACTIVATE JWT AUTH FOR REAL TESTING RIGHT NOW:
-#   1. Set JWT_SECRET in .env to the backend team's actual
-#      ACCESS_TOKEN_SECRET value (get this from them securely — not
-#      pasted in plaintext chat/email).
-#   2. Set AUTH_MODE=jwt in .env.
-#   3. Get a real access token from their /login endpoint and use it
-#      as `Authorization: Bearer <token>` in requests to this service.
-#
-# Until the backend adds adult_eligible/entitled, you can still test
-# the romantic/intimate conversation path using
-# AUTH_MODE=local_api_key with X-Debug-Adult-Eligible: true — real JWT
-# auth cannot produce that today no matter what token you present.

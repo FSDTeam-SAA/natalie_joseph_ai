@@ -36,4 +36,7 @@ class MessageResponse(BaseModel):
     id: uuid.UUID
     role: str
     content: str
+    message_type: str = "text"
+    media_id: uuid.UUID | None = None
+    media_url: str | None = None
     created_at: datetime

@@ -11,9 +11,10 @@ future caller remembering to filter correctly.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.db.models.memory import Memory, MemoryType
 from app.repositories.base_repository import BaseRepository
@@ -21,6 +22,19 @@ from app.repositories.base_repository import BaseRepository
 
 class MemoryRepository(BaseRepository[Memory]):
     model = Memory
+
+    async def acquire_key_lock(
+        self, *, user_id: uuid.UUID, companion_id: uuid.UUID, key: str
+    ) -> None:
+        """Serialize key-based memory upserts across background workers."""
+        digest = hashlib.blake2b(
+            f"{user_id}:{companion_id}:{key}".encode(), digest_size=8
+        ).digest()
+        lock_key = int.from_bytes(digest, byteorder="big", signed=True)
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
 
     async def search_similar(
         self,
@@ -78,7 +92,6 @@ class MemoryRepository(BaseRepository[Memory]):
                 Memory.user_id == user_id,
                 Memory.companion_id == companion_id,
                 Memory.key == key,
-                Memory.active.is_(True),
             )
         )
         return result.scalar_one_or_none()

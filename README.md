@@ -1,142 +1,183 @@
-# Meet Elysia — AI Companion Engine
+# Meet Elysia AI Companion Engine
 
-AI backend service for the Meet Elysia companion platform. This repo
-owns the AI layer only: companion personas, conversation orchestration,
-memory, context assembly, and safety moderation. It does **not** own
-the frontend, payments UI, or authentication UI — those belong to the
-main backend/frontend team.
+This repository is the AI/media service for Meet Elysia. It owns companion
+personas, Grok conversation generation, memory and relationship continuity,
+moderation, ElevenLabs speech, GPT image generation, private media storage,
+and companion-world story context.
 
-This README will grow with each phase. Right now it documents **Phase 1**.
+The main backend owns end-user authentication, profiles, companion access,
+adult eligibility, subscriptions/payments/credits, scheduling, notifications,
+and usage accounting. This repository contains no frontend. The backend should
+therefore authorize each operation before forwarding a trusted user and
+companion reference to this service.
 
----
+## Implemented flows
 
-## Phase 1 scope (delivered)
+- Text: trusted identity → moderation → persona/history/memory/story context →
+  Grok 4.6 → output moderation → persistence.
+- Voice input: validated audio → ElevenLabs Scribe STT → the same text-chat
+  pipeline → optional, explicitly requested ElevenLabs TTS.
+- Voice output: a per-companion cloned voice ID, resolved from deployment
+  configuration; no unnecessary automatic TTS.
+- Images: authorized request/contextual trigger → prompt moderation → approved
+  companion reference image + visual profile/history/story → GPT image edit →
+  multimodal output moderation → private storage.
+- Proactive interactions: the main backend schedules an eligible notification;
+  this service generates the contextual text or optional voice response.
+- Living-world continuity: the backend/social pipeline upserts global companion
+  story events, which are reused by chat, proactive responses, and images.
 
-- Project scaffold matching the full target directory structure
-- `app/core/config.py` — typed settings, all confirmed env vars, all
-  pending items explicitly marked `TODO-CONFIRM`
-- `app/core/logging.py` — structured JSON logging, never logs raw
-  conversation content
-- `app/core/exceptions.py` — full application error hierarchy
-- `app/core/security.py` — `AuthProvider` **interface only**; JWT
-  verification is intentionally not implemented yet (see below)
-- `app/db/base.py`, `app/db/session.py` — async SQLAlchemy setup, no
-  models yet (Phase 2)
-- `app/api/health.py`, `app/main.py` — `/health` and `/health/ready`,
-  wired into a real FastAPI app with global error handlers
-- `Dockerfile`, `docker-compose.yml` (app, postgres+pgvector, redis,
-  worker placeholder)
-- `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako` — ready for
-  Phase 2 migrations
-- `requirements.txt`, `pyproject.toml`, `Makefile`
-- `.env.example`, `.gitignore`
-- `tests/unit/test_health.py` — passing smoke test
+Text, audio, and image assistant messages share one conversation/message model.
+Long-term memories use pgvector, rolling summaries and deterministic
+relationship stages are maintained after chat turns, and generated media can
+only be retrieved by its owning user.
 
-**Verified working** (not just written): dependencies installed
-cleanly in a fresh venv, `app.main` imports without error, the app
-boots under uvicorn, `/health` returns `200 {"status": "ok"}`, and
-`pytest` passes.
+## Local setup
 
-## What is intentionally NOT in Phase 1
+Copy `.env.example` to `.env`, populate development credentials, then run:
 
-- No database models or migrations yet (Phase 2)
-- No companion configs or companion API yet (Phase 3)
-- No chat endpoint, no LLM calls yet (Phases 4–5)
-- **No working authentication.** `AuthProvider` is an interface with a
-  `NotConfiguredAuthProvider` that always fails closed. Real JWT
-  verification needs the items listed below from the backend team.
-
----
-
-## Running locally
-
-```bash
-cp .env.example .env
-# Fill in OPENAI_API_KEY once Phase 4 needs it.
-# JWT_* fields remain blank until backend team confirms details (see below).
-
+```powershell
 docker compose up --build
+docker compose exec app alembic upgrade head
+docker compose exec app python -m app.scripts.seed_companions
 ```
 
-Swagger UI: http://localhost:8000/docs
-Health: http://localhost:8000/health and http://localhost:8000/health/ready
+Swagger UI is available at `http://localhost:8000/docs`. Liveness and readiness
+are `GET /health` and `GET /health/ready`; readiness checks the database, Redis,
+provider configuration, auth configuration, and enabled media features.
 
-## Running tests
+For direct local calls, set `AUTH_MODE=local_api_key` and send
+`Authorization: Bearer <LOCAL_API_KEY>`. This mode is rejected in production.
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pytest -v
+## Main-backend contract
+
+Recommended production mode:
+
+```env
+AUTH_MODE=internal_service_token
+INTERNAL_SERVICE_TOKEN=<long randomly generated secret>
+BACKEND_COMPANION_ID_MAP={"<backend Elena ID>":"elena","<backend Chloé ID>":"chloe","<backend Thalia ID>":"thalia","<backend Lina ID>":"lina","<backend Luna ID>":"luna"}
 ```
 
----
+Every private request must be made over a protected network/TLS connection with:
 
-## Backend integration contract — what's confirmed vs. still needed
+```text
+Authorization: Bearer <INTERNAL_SERVICE_TOKEN>
+X-Backend-User-Id: <UUID authenticated by the main backend>
+X-Backend-Adult-Eligible: true|false
+X-Backend-Entitled: true|false
+X-Backend-AI-Features: chat,voice_input,voice_output,image,proactive,story_context
+```
 
-### Confirmed (2026-08-24)
-| Item | Value |
-|---|---|
-| Auth mechanism | JWT |
-| `user_id`, `conversation_id`, `companion_id` format | UUID |
-| Adult eligibility delivery | JWT claim |
-| Chat model | GPT-5.6 Terra |
-| Memory extraction model | GPT-5.6 Luna |
-| Conversation summary model | GPT-5.6 Luna |
-| Emotion/context classification model | GPT-5.6 Luna |
-| Evaluation model | GPT-5.6 Sol |
+When a feature list is present it is authoritative. The main backend must check
+companion access and reserve/debit plan usage or credits before making an
+expensive call. Every generation request includes a UUID idempotency key so a
+backend retry does not purchase duplicate output.
 
-### Still needed from the backend team before Phase 5 (auth) can be implemented
-- JWT signing algorithm (HS256 shared secret vs RS256/ES256 public key / JWKS)
-- The actual public key, JWKS URL, or shared secret
-- Expected `iss` (issuer) and `aud` (audience) claim values
-- Exact claim name carrying the user UUID (e.g. `sub` vs `user_id`)
-- Exact claim name carrying the adult-eligibility flag
-- Exact claim name carrying the entitlement/subscription flag
-- Confirmation that the token is sent as `Authorization: Bearer <jwt>`
+The adapter endpoints accept the backend's companion ID (mapped to a stable AI
+slug) and an optional string/UUID/cuid `external_conversation_id`:
 
-### Still needed before later phases
-- Whether the main backend needs webhooks/callbacks for background job
-  results (memory extraction, summarization) or is purely fire-and-forget
-- Any existing per-companion visual/image asset pipeline details, if
-  Phase 12 image generation is ever turned on
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/internal/companions/{ref}/messages` | Text chat or explicit image request |
+| `POST` | `/api/v1/internal/companions/{ref}/voice` | Text chat plus requested TTS |
+| `POST` | `/api/v1/internal/companions/{ref}/voice-input` | Multipart audio STT, chat, and optional TTS |
+| `POST` | `/api/v1/internal/companions/{ref}/images` | Requested or contextual image |
+| `POST` | `/api/v1/internal/companions/{ref}/proactive` | Scheduled text/voice check-in |
+| `PUT` | `/api/v1/internal/companions/{ref}/story-events` | Idempotent public-story event upsert |
 
-## Division of responsibility
+If the main backend does not supply a conversation ID, the adapter reuses one
+durable conversation per user/companion. The original UUID-based endpoints
+remain available under `/api/v1/chat`, `/api/v1/chat/voice`,
+`/api/v1/images/generate`, `/api/v1/media/{media_id}`, and
+`/api/v1/conversations/*`.
 
-**AI developer (this repo) owns:**
-Everything under `app/`, `config/`, `alembic/`, provider abstractions,
-memory/context/safety logic, this service's own database, Docker setup
-for this service, and this service's tests.
+Both message endpoints conservatively recognize explicit natural-language photo
+requests (for example, “Show me what you're wearing tonight”) and return an
+image-typed `ChatResponse` with a private media descriptor. They require one
+caller-generated UUID `idempotency_key`; the same key is reused through routing
+so retries cannot purchase both text and image output.
 
-**Backend team owns:**
-Issuing and signing JWTs, deciding entitlement/adult-eligibility logic
-upstream, the frontend, payments, and calling this service's `/api/v1/*`
-endpoints with correctly-authenticated requests.
+Direct JWT verification is also implemented, but should only be selected when
+the JWT contract supplies a UUID user ID plus authoritative adult, entitlement,
+feature, and expiry claims.
 
----
+## Companion media activation
 
-## Full phase plan
+Provider keys, cloned voice IDs, and licensed reference images are deployment
+assets and are intentionally absent from source control.
 
-1. **Foundation** (this phase) — scaffold, config, Docker, health checks
-2. **Data layer** — SQLAlchemy models, Alembic migration, repositories
-3. **Companion configuration & API** — 5 companion JSON configs, companion endpoints
-4. **Provider layer** — LLMProvider/EmbeddingProvider/ModerationProvider/ImageProvider (OpenAI)
-5. **Conversation core + basic chat** — conversation endpoints, non-streaming chat, real auth
-6. **Context assembly & prompt builder**
-7. **Memory engine** — extraction, dedup, embeddings, retrieval
-8. **Summarization + relationship context + background jobs**
-9. **Safety layer** — moderation pipeline, injection defense, dependency safeguards, age gating
-10. **Streaming + rate limiting + cost tracking**
-11. **User data deletion + matching engine**
-12. **Testing, evaluation suites, docs, final polish**
+```env
+XAI_API_KEY=
+OPENAI_API_KEY=
+ELEVENLABS_API_KEY=
 
-## Known limitations (Phase 1)
+COMPANION_VOICE_ID_MAP={"elena":"...","chloe":"...","thalia":"...","lina":"...","luna":"..."}
+COMPANION_REFERENCE_IMAGE_MAP={"elena":["elena/reference.webp"],"chloe":["chloe/reference.webp"],"thalia":["thalia/reference.webp"],"lina":["lina/reference.webp"],"luna":["luna/reference.webp"]}
 
-- Service has no real authentication yet — every request would be
-  rejected by design until Phase 5.
-- No database tables exist yet — `/health/ready` will report a DB
-  connection error until Phase 2's migration is applied (it can still
-  connect if Postgres is up; it just has no schema).
-- Celery worker command in `docker-compose.yml` references
-  `app.workers.celery_app`, which doesn't exist until Phase 8 — the
-  `worker` service will fail to start until then. This is expected and
-  documented, not a bug to chase in Phase 1.
+ENABLE_VOICE_INPUT=true
+ENABLE_VOICE_GENERATION=true
+ENABLE_IMAGE_GENERATION=true
+MAX_AUDIO_UPLOAD_BYTES=10485760
+MAX_AUDIO_DURATION_SECONDS=300
+MAX_TRANSCRIPT_CHARACTERS=4000
+```
+
+Reference paths are relative to `COMPANION_ASSET_ROOT`; see
+`config/companion_assets/README.md`. Run the companion seed after changing either
+mapping. Features fail closed if a required provider key, voice ID, reference
+asset, or backend grant is missing.
+The `/api/v1/chat` endpoint also recognizes conservative natural-language image
+requests (including the companion-photo examples from the product brief), while
+ordinary photo-related conversation remains on the text pipeline.
+
+`MEDIA_STORAGE_BACKEND=local` writes opaque files under `MEDIA_STORAGE_ROOT`.
+For production, mount that directory as durable private storage. A multi-instance
+deployment should add an object-storage adapter rather than sharing public paths.
+
+## Database and tests
+
+Apply migrations in order and seed the five companions (Elena, Chloé, Thalia,
+Lina, and Luna):
+
+```powershell
+.\venv\Scripts\alembic.exe upgrade head
+.\venv\Scripts\python.exe -m app.scripts.seed_companions
+```
+
+Run unit tests without external services:
+
+```powershell
+.\venv\Scripts\python.exe -m pytest -q
+.\venv\Scripts\ruff.exe check app tests alembic
+```
+
+Database integration tests are skipped unless an explicitly isolated, migrated
+database is provided. They never inherit `DATABASE_URL` from `.env`:
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/meet_elysia_test"
+$env:DATABASE_URL = $env:TEST_DATABASE_URL
+if ($env:DATABASE_URL -ne $env:TEST_DATABASE_URL) { throw "Refusing non-test database" }
+.\venv\Scripts\alembic.exe upgrade head
+.\venv\Scripts\python.exe -m app.scripts.seed_companions
+.\venv\Scripts\python.exe -m pytest -q -m integration
+```
+
+Do not point `TEST_DATABASE_URL` at staging or production. Provider calls are
+mocked in integration tests.
+
+## Operational safeguards
+
+- Redis enforces per-user, per-IP, and short-burst limits and can fail closed.
+- PostgreSQL advisory locks plus unique idempotency keys protect paid operations
+  from concurrent retries.
+- Audio/image size and MIME signatures are validated; reference paths are
+  confined to the configured asset root.
+- Provider errors are normalized; API responses never expose provider secrets,
+  raw stack traces, or local storage paths.
+- User/conversation deletion removes both database state and owned media bytes.
+- Raw conversation content is excluded from structured application logs.
+
+The API contract supports a separate frontend, but recording/playback/rendering
+UI must be implemented in the frontend repository owned by that team.

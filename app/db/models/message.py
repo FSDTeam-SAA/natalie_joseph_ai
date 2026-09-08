@@ -11,21 +11,37 @@ from __future__ import annotations
 
 import enum
 import uuid
+from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Enum as SAEnum, Identity
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Float,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, UUIDPrimaryKeyMixin
-from sqlalchemy import DateTime
-from datetime import datetime, timezone
 
 
 class MessageRole(str, enum.Enum):
     user = "user"
     assistant = "assistant"
     system = "system"
+
+
+class MessageType(str, enum.Enum):
+    text = "text"
+    audio = "audio"
+    image = "image"
 
 
 class Message(Base, UUIDPrimaryKeyMixin):
@@ -60,6 +76,21 @@ class Message(Base, UUIDPrimaryKeyMixin):
         nullable=False,
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    message_type: Mapped[MessageType] = mapped_column(
+        SAEnum(MessageType, name="message_type", native_enum=False, validate_strings=True),
+        nullable=False,
+        default=MessageType.text,
+    )
+    media_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("media_assets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    client_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=True,
+        doc="Backend-supplied idempotency key on user messages.",
+    )
 
     # Metadata for cost tracking / observability (spec Section 39-40).
     model: Mapped[str | None] = mapped_column(
@@ -85,7 +116,7 @@ class Message(Base, UUIDPrimaryKeyMixin):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -93,4 +124,8 @@ class Message(Base, UUIDPrimaryKeyMixin):
         Index("ix_messages_conversation_id", "conversation_id"),
         Index("ix_messages_created_at", "created_at"),
         Index("ix_messages_conversation_id_sequence", "conversation_id", "sequence"),
+        Index("ix_messages_media_asset_id", "media_asset_id"),
+        UniqueConstraint(
+            "conversation_id", "client_request_id", name="uq_message_conversation_request"
+        ),
     )

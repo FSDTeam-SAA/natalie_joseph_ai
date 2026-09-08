@@ -21,6 +21,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from app.core.config import get_settings
 from app.db.models.companion import Companion
 from app.db.session import AsyncSessionLocal
 from app.repositories.companion_repository import CompanionRepository
@@ -28,10 +29,8 @@ from app.repositories.companion_repository import CompanionRepository
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "companions"
 
 # Per spec Section 2: the five companion IDs must be stable.
-# NOTE: "anastacia" was renamed to "lina" per product owner decision
-# after initial spec delivery — the stable set below reflects that
-# rename, not the original spec document's literal wording.
 EXPECTED_SLUGS = {"elena", "chloe", "thalia", "lina", "luna"}
+LEGACY_LINA_SLUGS = ("anast" + "acia", "anast" + "asia")
 
 
 def _load_companion_json(path: Path) -> dict:
@@ -39,7 +38,44 @@ def _load_companion_json(path: Path) -> dict:
         return json.load(f)
 
 
-def _build_config_blocks(raw: dict) -> dict:
+def _load_validated_configs() -> list[tuple[Path, dict]]:
+    """Load exactly the five canonical, lower-case companion files."""
+    json_files = sorted(
+        path for path in CONFIG_DIR.iterdir() if path.is_file() and path.suffix == ".json"
+    )
+    loaded: list[tuple[Path, dict]] = []
+    found_slugs: list[str] = []
+    for path in json_files:
+        raw = _load_companion_json(path)
+        slug = raw.get("id")
+        if not isinstance(slug, str) or not slug:
+            raise RuntimeError(f"Companion config {path.name} has no valid string id.")
+        if path.name != f"{slug}.json":
+            raise RuntimeError(
+                f"Companion config {path.name} must be named exactly {slug}.json."
+            )
+        if not isinstance(raw.get("name"), str) or not raw["name"].strip():
+            raise RuntimeError(f"Companion config {path.name} has no valid name.")
+        found_slugs.append(slug)
+        loaded.append((path, raw))
+
+    duplicates = sorted(slug for slug in set(found_slugs) if found_slugs.count(slug) > 1)
+    found = set(found_slugs)
+    if duplicates or found != EXPECTED_SLUGS:
+        raise RuntimeError(
+            "Companion configs must contain exactly the five canonical slugs; "
+            f"missing={sorted(EXPECTED_SLUGS - found)}, "
+            f"unexpected={sorted(found - EXPECTED_SLUGS)}, duplicates={duplicates}."
+        )
+    return loaded
+
+
+def _build_config_blocks(
+    raw: dict,
+    *,
+    voice_id: str | None = None,
+    reference_images: list[str] | None = None,
+) -> dict:
     """
     Map a companion JSON file's structure onto the five JSONB columns
     defined on the Companion model. This is the single place that
@@ -64,7 +100,12 @@ def _build_config_blocks(raw: dict) -> dict:
     }
     background_config = raw.get("background", {})
     interest_config = {"interests": raw.get("interests", [])}
-    visual_config = raw.get("visual_profile", {})
+    visual_config = dict(raw.get("visual_profile", {}))
+    if reference_images is not None:
+        visual_config["reference_images"] = reference_images
+    voice_config = dict(raw.get("voice", {}))
+    if voice_id is not None:
+        voice_config["voice_id"] = voice_id
 
     return {
         "personality_config": personality_config,
@@ -72,26 +113,34 @@ def _build_config_blocks(raw: dict) -> dict:
         "background_config": background_config,
         "interest_config": interest_config,
         "visual_config": visual_config,
+        "voice_config": voice_config,
     }
 
 
 async def seed_companions() -> None:
-    json_files = sorted(CONFIG_DIR.glob("*.json"))
-    if not json_files:
-        raise RuntimeError(f"No companion config files found in {CONFIG_DIR}")
-
-    found_slugs = set()
+    settings = get_settings()
+    configs = _load_validated_configs()
 
     async with AsyncSessionLocal() as session:
         repo = CompanionRepository(session)
 
-        for path in json_files:
-            raw = _load_companion_json(path)
+        for _path, raw in configs:
             slug = raw["id"]
-            found_slugs.add(slug)
 
-            config_blocks = _build_config_blocks(raw)
+            config_blocks = _build_config_blocks(
+                raw,
+                voice_id=settings.COMPANION_VOICE_ID_MAP.get(slug),
+                reference_images=settings.COMPANION_REFERENCE_IMAGE_MAP.get(slug),
+            )
             existing = await repo.get_by_slug(slug)
+            if slug == "lina" and existing is None:
+                # Rename an existing deployment in place so its UUID—and all
+                # conversations, memories, and relationship FKs—stay intact.
+                for legacy_slug in LEGACY_LINA_SLUGS:
+                    existing = await repo.get_by_slug(legacy_slug)
+                    if existing is not None:
+                        existing.slug = "lina"
+                        break
 
             if existing is not None:
                 existing.name = raw["name"]
@@ -101,6 +150,7 @@ async def seed_companions() -> None:
                 existing.background_config = config_blocks["background_config"]
                 existing.interest_config = config_blocks["interest_config"]
                 existing.visual_config = config_blocks["visual_config"]
+                existing.voice_config = config_blocks["voice_config"]
                 existing.active = True
                 print(f"Updated companion: {slug}")
             else:
@@ -114,22 +164,16 @@ async def seed_companions() -> None:
                 await repo.add(companion)
                 print(f"Created companion: {slug}")
 
+        # If an earlier deployment already had both Lina and a legacy row,
+        # preserve historical FKs but ensure only the canonical profile is active.
+        for legacy_slug in LEGACY_LINA_SLUGS:
+            legacy = await repo.get_by_slug(legacy_slug)
+            if legacy is not None:
+                legacy.active = False
+
         await session.commit()
 
-    missing = EXPECTED_SLUGS - found_slugs
-    if missing:
-        print(
-            f"WARNING: expected companion slugs not found in {CONFIG_DIR}: "
-            f"{sorted(missing)}"
-        )
-    unexpected = found_slugs - EXPECTED_SLUGS
-    if unexpected:
-        print(
-            f"WARNING: unexpected companion slugs found (not in the stable "
-            f"five per spec Section 2): {sorted(unexpected)}"
-        )
-
-    print(f"Seeding complete. {len(found_slugs)} companion(s) processed.")
+    print(f"Seeding complete. {len(configs)} companion(s) processed.")
 
 
 if __name__ == "__main__":

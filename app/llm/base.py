@@ -27,6 +27,18 @@ class LLMMessage:
 class LLMUsage:
     input_tokens: int
     output_tokens: int
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost_usd_ticks: int | None = None
+
+    def as_metadata(self) -> dict[str, int]:
+        metadata = {
+            "cached_input_tokens": self.cached_input_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+        }
+        if self.cost_usd_ticks is not None:
+            metadata["cost_usd_ticks"] = self.cost_usd_ticks
+        return metadata
 
 
 @dataclass(frozen=True)
@@ -65,6 +77,8 @@ class LLMProvider(ABC):
         model: str,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        cache_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResult:
         """Non-streaming generation. Used by the non-streaming chat endpoint."""
         raise NotImplementedError
@@ -77,6 +91,8 @@ class LLMProvider(ABC):
         model: str,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        cache_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[str]:
         """
         Streaming generation. Yields incremental user-visible text

@@ -61,6 +61,11 @@ class ProviderError(AppError):
     status_code = 502
 
 
+class ServiceUnavailableError(AppError):
+    code = "SERVICE_UNAVAILABLE"
+    status_code = 503
+
+
 class RateLimitError(AppError):
     code = "RATE_LIMIT_EXCEEDED"
     status_code = 429

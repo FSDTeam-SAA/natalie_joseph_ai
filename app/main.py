@@ -1,26 +1,22 @@
-"""
-Meet Elysia — AI Companion Engine
-Application entrypoint.
-
-Phase 1 scope: app bootstrap, config, logging, error handling, health
-checks only. Business routers (chat, companions, conversations,
-memories, users) are added in later phases as their services are
-implemented — they are intentionally NOT wired in here yet so this
-service never claims functionality it doesn't have.
-"""
+"""Meet Elysia AI Companion Engine application entrypoint."""
 
 from __future__ import annotations
 
+import logging
 import uuid
+from http import HTTPStatus
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import chat, companions, conversations, health
+from app.api import backend, chat, companions, conversations, health, media, users, voice
 from app.core.config import AppEnv, AuthMode, get_settings
 from app.core.exceptions import AppError
 from app.core.logging import configure_logging
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 configure_logging(settings.LOG_LEVEL)
 
@@ -28,7 +24,7 @@ if settings.APP_ENV == AppEnv.production and settings.AUTH_MODE == AuthMode.loca
     raise RuntimeError(
         "Refusing to start: AUTH_MODE=local_api_key is a development-only "
         "auth mode and must never run with APP_ENV=production. Set "
-        "AUTH_MODE=jwt (and configure the JWT_* settings) for production."
+        "AUTH_MODE=internal_service_token or jwt for production."
     )
 
 app = FastAPI(
@@ -36,7 +32,7 @@ app = FastAPI(
     description=(
         "AI backend service for the Meet Elysia companion platform. "
         "Owns conversation orchestration, companion personas, memory, "
-        "context assembly, and safety moderation. Does not own "
+        "voice/image generation, story context, and safety moderation. Does not own "
         "authentication UI, payments, or the frontend."
     ),
     version="0.1.0",
@@ -69,10 +65,50 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    request: Request, _exc: RequestValidationError
+) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "The request payload is invalid.",
+                "request_id": request_id,
+            }
+        },
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", None)
+    try:
+        message = HTTPStatus(exc.status_code).phrase
+    except ValueError:
+        message = "HTTP error"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": f"HTTP_{exc.status_code}",
+                "message": message,
+                "request_id": request_id,
+            }
+        },
+        headers=exc.headers,
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     # Never expose stack traces or internal details in the response body.
     request_id = getattr(request.state, "request_id", None)
+    logger.exception("unhandled_request_error", extra={"request_id": request_id})
     return JSONResponse(
         status_code=500,
         content={
@@ -89,7 +125,7 @@ app.include_router(health.router)
 app.include_router(companions.router, prefix=settings.API_V1_PREFIX)
 app.include_router(conversations.router, prefix=settings.API_V1_PREFIX)
 app.include_router(chat.router, prefix=settings.API_V1_PREFIX)
-
-# Business routers — registered here as they're delivered in later phases:
-# app.include_router(memories.router, prefix=settings.API_V1_PREFIX, tags=["Memories"])        # Phase 7
-# app.include_router(users.router, prefix=settings.API_V1_PREFIX, tags=["Users"])              # Phase 11
+app.include_router(media.router, prefix=settings.API_V1_PREFIX)
+app.include_router(voice.router, prefix=settings.API_V1_PREFIX)
+app.include_router(users.router, prefix=settings.API_V1_PREFIX)
+app.include_router(backend.router, prefix=settings.API_V1_PREFIX)

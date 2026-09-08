@@ -53,6 +53,13 @@ class Companion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     background_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
     interest_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
     visual_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    voice_config: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        doc="Provider-neutral voice mapping and synthesis settings. Voice IDs live "
+        "in companion configuration, never in request handlers.",
+    )
 
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

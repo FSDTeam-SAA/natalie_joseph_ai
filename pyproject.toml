@@ -9,6 +9,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: requires an explicit isolated TEST_DATABASE_URL",
+]
 
 [tool.ruff]
 line-length = 100
@@ -16,6 +19,15 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "B008",  # FastAPI dependency injection intentionally uses Depends in defaults.
+    "UP046", # Keep Generic[...] syntax while local tooling still supports Python 3.11.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Keep the two already-shipped generated migrations byte-stable. New migrations are linted.
+"alembic/versions/0001_initial_schema.py" = ["E501", "I001", "UP007", "UP035"]
+"alembic/versions/0002_add_message_sequence.py" = ["E501", "I001", "UP007", "UP035"]
 
 [tool.black]
 line-length = 100
