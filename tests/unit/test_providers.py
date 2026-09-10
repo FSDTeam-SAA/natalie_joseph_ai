@@ -1,14 +1,13 @@
 """
 Unit tests for Phase 4 provider implementations.
-
 These mock the OpenAI SDK client boundary (AsyncOpenAI.responses /
-.embeddings / .moderations) rather than making real network calls —
+.embeddings) rather than making real network calls —
 this environment has no network access to api.openai.com, and the
 configured model names (gpt-5.6-terra etc.) are the product owner's
 own naming, not real OpenAI models, so a live call would fail
 regardless of network access. The mock response shapes below were
 verified against the actual installed openai==3.3.1 SDK types
-(Response.output_text, Response.usage, Moderation.categories, etc.)
+(Response.output_text, Response.usage, etc.)
 rather than guessed — see the docstrings in the provider files for
 exactly what was inspected.
 
@@ -27,7 +26,6 @@ from app.core.exceptions import ProviderError
 from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
 from app.llm.base import LLMMessage
 from app.llm.openai_provider import OpenAIProvider
-from app.moderation.openai_moderation import OpenAIModerationProvider
 
 
 def _fake_response(text: str, *, model: str = "gpt-5.6-terra", response_id: str = "resp_123"):
@@ -191,60 +189,3 @@ class TestOpenAIEmbeddingProvider:
         assert result.dimensions == 3
         assert result.model == "text-embedding-3-small"
         mock_create.assert_called_once_with(input="hello", model="text-embedding-3-small")
-
-
-class TestOpenAIModerationProvider:
-    async def test_moderate_text_returns_flagged_result(self) -> None:
-        provider = OpenAIModerationProvider(api_key="sk-fake")
-
-        fake_categories = SimpleNamespace(model_dump=lambda: {"violence": False, "sexual": False})
-        fake_scores = SimpleNamespace(model_dump=lambda: {"violence": 0.001, "sexual": 0.002})
-        fake_result = SimpleNamespace(
-            flagged=False, categories=fake_categories, category_scores=fake_scores
-        )
-        fake_response = SimpleNamespace(
-            results=[fake_result], model_dump=lambda: {"results": ["..."]}
-        )
-
-        with patch.object(
-            provider._client.moderations, "create", new=AsyncMock(return_value=fake_response)
-        ) as mock_create:
-            result = await provider.moderate_text("hello", model="omni-moderation-latest")
-
-        assert result.flagged is False
-        assert result.categories["violence"] is False
-        mock_create.assert_called_once_with(input="hello", model="omni-moderation-latest")
-
-    async def test_moderate_multimodal_builds_correct_input_items(self) -> None:
-        provider = OpenAIModerationProvider(api_key="sk-fake")
-
-        fake_categories = SimpleNamespace(model_dump=lambda: {})
-        fake_scores = SimpleNamespace(model_dump=lambda: {})
-        fake_result = SimpleNamespace(
-            flagged=True, categories=fake_categories, category_scores=fake_scores
-        )
-        fake_response = SimpleNamespace(results=[fake_result], model_dump=lambda: {})
-
-        with patch.object(
-            provider._client.moderations, "create", new=AsyncMock(return_value=fake_response)
-        ) as mock_create:
-            result = await provider.moderate_multimodal(
-                text="check this",
-                image_url="https://example.com/img.png",
-                model="omni-moderation-latest",
-            )
-
-        assert result.flagged is True
-        call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs["input"] == [
-            {"type": "text", "text": "check this"},
-            {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
-        ]
-
-    async def test_moderate_multimodal_requires_at_least_one_input(self) -> None:
-        from app.core.exceptions import ValidationError
-
-        provider = OpenAIModerationProvider(api_key="sk-fake")
-
-        with pytest.raises(ValidationError):
-            await provider.moderate_multimodal(model="omni-moderation-latest")

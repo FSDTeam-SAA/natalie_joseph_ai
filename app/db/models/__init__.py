@@ -15,7 +15,6 @@ from app.db.models.relationship_context import (
     FamiliarityLevel,
     RelationshipContext,
 )
-from app.db.models.safety_event import SafetyDirection, SafetyEvent
 from app.db.models.story_event import StoryEvent
 from app.db.models.user import User
 
@@ -33,8 +32,6 @@ __all__ = [
     "MediaAsset",
     "MediaKind",
     "RelationshipContext",
-    "SafetyDirection",
-    "SafetyEvent",
     "StoryEvent",
     "User",
 ]

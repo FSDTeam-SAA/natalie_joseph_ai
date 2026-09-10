@@ -9,6 +9,7 @@ class StoredObject:
     key: str
     byte_size: int
     sha256: str
+    public_url: str | None = None
 
 
 class MediaStorage(ABC):

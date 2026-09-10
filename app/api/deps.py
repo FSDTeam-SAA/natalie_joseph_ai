@@ -9,7 +9,7 @@ from functools import lru_cache
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import Settings, get_settings
+from app.core.config import MediaStorageBackend, Settings, get_settings
 from app.core.exceptions import ServiceUnavailableError
 from app.core.rate_limit import RateLimiter
 from app.core.security import AuthContext, get_current_auth_context
@@ -17,14 +17,14 @@ from app.db.session import get_db_session
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
 from app.images.base import ImageProvider
+from app.images.failover import FailoverImageProvider
 from app.images.openai_images import OpenAIImageProvider
+from app.images.xai_images import XAIImageProvider
 from app.llm.base import LLMProvider
 from app.llm.failover_provider import FailoverLLMProvider
 from app.llm.openai_provider import OpenAIProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.xai_provider import XAIProvider
-from app.moderation.base import ModerationProvider
-from app.moderation.openai_moderation import OpenAIModerationProvider
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.media_repository import MediaRepository
 from app.repositories.memory_repository import MemoryRepository
@@ -46,6 +46,7 @@ from app.services.story_service import StoryService
 from app.services.user_data_service import UserDataService
 from app.services.voice_service import VoiceService
 from app.storage.base import MediaStorage
+from app.storage.cloudinary import CloudinaryMediaStorage
 from app.storage.local import LocalMediaStorage
 from app.voice.base import VoiceProvider
 from app.voice.elevenlabs_provider import ElevenLabsVoiceProvider
@@ -143,27 +144,6 @@ def get_embedding_provider(settings: Settings = Depends(get_settings)) -> Embedd
     )
 
 
-@lru_cache
-def _cached_moderation_provider(
-    api_key: str, timeout_seconds: float, max_retries: int
-) -> ModerationProvider:
-    return OpenAIModerationProvider(
-        api_key=api_key,
-        timeout_seconds=timeout_seconds,
-        max_retries=max_retries,
-    )
-
-
-def get_moderation_provider(settings: Settings = Depends(get_settings)) -> ModerationProvider:
-    if not settings.OPENAI_API_KEY:
-        raise ServiceUnavailableError("OpenAI moderation is not configured.")
-    return _cached_moderation_provider(
-        settings.OPENAI_API_KEY,
-        settings.PROVIDER_TIMEOUT_SECONDS,
-        settings.PROVIDER_MAX_RETRIES,
-    )
-
-
 def get_prompt_builder(settings: Settings = Depends(get_settings)) -> PromptBuilder:
     return PromptBuilder.from_settings(settings)
 
@@ -193,10 +173,7 @@ def get_conversation_service(
         message_repo=MessageRepository(db),
         settings=settings,
         media_repo=MediaRepository(db),
-        storage=LocalMediaStorage(
-            settings.MEDIA_STORAGE_ROOT,
-            max_bytes=settings.MAX_GENERATED_MEDIA_BYTES,
-        ),
+        storage=get_media_storage(settings),
     )
 
 
@@ -222,7 +199,6 @@ def get_chat_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
     llm_provider: LLMProvider = Depends(get_chat_llm_provider),
-    moderation_provider: ModerationProvider = Depends(get_moderation_provider),
     prompt_builder: PromptBuilder = Depends(get_prompt_builder),
     memory_service: MemoryService = Depends(get_memory_service),
     post_turn_processor: PostTurnProcessor = Depends(get_post_turn_processor),
@@ -234,7 +210,6 @@ def get_chat_service(
         message_repo=MessageRepository(db),
         relationship_repo=RelationshipRepository(db),
         llm_provider=llm_provider,
-        moderation_provider=moderation_provider,
         prompt_builder=prompt_builder,
         memory_service=memory_service,
         settings=settings,
@@ -244,30 +219,79 @@ def get_chat_service(
 
 
 @lru_cache
-def _cached_storage(root: str, max_bytes: int) -> MediaStorage:
+def _cached_storage(
+    backend: MediaStorageBackend,
+    root: str,
+    max_bytes: int,
+    cloud_name: str,
+    api_key: str,
+    api_secret: str,
+    folder: str,
+) -> MediaStorage:
+    if backend == MediaStorageBackend.cloudinary:
+        return CloudinaryMediaStorage(
+            cloud_name=cloud_name,
+            api_key=api_key,
+            api_secret=api_secret,
+            folder=folder,
+            max_bytes=max_bytes,
+        )
     return LocalMediaStorage(root, max_bytes=max_bytes)
 
 
 def get_media_storage(settings: Settings = Depends(get_settings)) -> MediaStorage:
-    return _cached_storage(settings.MEDIA_STORAGE_ROOT, settings.MAX_GENERATED_MEDIA_BYTES)
+    return _cached_storage(
+        settings.MEDIA_STORAGE_BACKEND,
+        settings.MEDIA_STORAGE_ROOT,
+        settings.MAX_GENERATED_MEDIA_BYTES,
+        settings.CLOUDINARY_CLOUD_NAME,
+        settings.CLOUDINARY_API_KEY,
+        settings.CLOUDINARY_API_SECRET,
+        settings.CLOUDINARY_FOLDER,
+    )
 
 
 @lru_cache
 def _cached_image_provider(
-    api_key: str, timeout_seconds: float, max_retries: int
+    xai_api_key: str,
+    xai_base_url: str,
+    openai_api_key: str,
+    openai_image_model: str,
+    timeout_seconds: float,
+    max_retries: int,
 ) -> ImageProvider:
-    return OpenAIImageProvider(
-        api_key=api_key,
-        timeout_seconds=timeout_seconds,
-        max_retries=max_retries,
+    return FailoverImageProvider(
+        primary=(
+            XAIImageProvider(
+                api_key=xai_api_key,
+                base_url=xai_base_url,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+            )
+            if xai_api_key
+            else None
+        ),
+        fallback=(
+            OpenAIImageProvider(
+                api_key=openai_api_key,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+            )
+            if openai_api_key
+            else None
+        ),
+        fallback_model=openai_image_model,
     )
 
 
 def get_image_provider(settings: Settings = Depends(get_settings)) -> ImageProvider:
-    if not settings.OPENAI_API_KEY:
-        raise ServiceUnavailableError("OpenAI image generation is not configured.")
+    if not settings.XAI_API_KEY and not settings.OPENAI_API_KEY:
+        raise ServiceUnavailableError("No image-generation provider is configured.")
     return _cached_image_provider(
+        settings.XAI_API_KEY,
+        settings.XAI_BASE_URL,
         settings.OPENAI_API_KEY,
+        settings.OPENAI_IMAGE_MODEL,
         settings.PROVIDER_TIMEOUT_SECONDS,
         settings.PROVIDER_MAX_RETRIES,
     )
@@ -277,7 +301,6 @@ def get_image_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
     image_provider: ImageProvider = Depends(get_image_provider),
-    moderation_provider: ModerationProvider = Depends(get_moderation_provider),
     storage: MediaStorage = Depends(get_media_storage),
 ) -> ImageService:
     return ImageService(
@@ -287,7 +310,6 @@ def get_image_service(
         message_repo=MessageRepository(db),
         media_repo=MediaRepository(db),
         image_provider=image_provider,
-        moderation_provider=moderation_provider,
         storage=storage,
         settings=settings,
         story_repo=StoryEventRepository(db),
@@ -345,6 +367,7 @@ def get_voice_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
     chat_service: ChatService = Depends(get_chat_service),
+    chat_routing_service: ChatRoutingService = Depends(get_chat_routing_service),
     voice_provider: VoiceProvider = Depends(get_voice_provider),
     storage: MediaStorage = Depends(get_media_storage),
 ) -> VoiceService:
@@ -355,6 +378,7 @@ def get_voice_service(
         message_repo=MessageRepository(db),
         media_repo=MediaRepository(db),
         chat_service=chat_service,
+        chat_routing_service=chat_routing_service,
         voice_provider=voice_provider,
         storage=storage,
         settings=settings,
@@ -365,6 +389,8 @@ def get_optional_voice_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
     storage: MediaStorage = Depends(get_media_storage),
+    chat_service: ChatService = Depends(get_chat_service),
+    chat_routing_service: ChatRoutingService = Depends(get_chat_routing_service),
 ) -> VoiceService | None:
     """Build synthesis-only support without constructing the full chat pipeline."""
     if not settings.ELEVENLABS_API_KEY:
@@ -381,7 +407,8 @@ def get_optional_voice_service(
         conversation_repo=ConversationRepository(db),
         message_repo=MessageRepository(db),
         media_repo=MediaRepository(db),
-        chat_service=None,
+        chat_service=chat_service,
+        chat_routing_service=chat_routing_service,
         voice_provider=voice_provider,
         storage=storage,
         settings=settings,
@@ -415,7 +442,6 @@ def get_proactive_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
     llm_provider: LLMProvider = Depends(get_chat_llm_provider),
-    moderation_provider: ModerationProvider = Depends(get_moderation_provider),
     prompt_builder: PromptBuilder = Depends(get_prompt_builder),
     memory_service: MemoryService = Depends(get_memory_service),
 ) -> ProactiveService:
@@ -423,7 +449,6 @@ def get_proactive_service(
         message_repo=MessageRepository(db),
         relationship_repo=RelationshipRepository(db),
         llm_provider=llm_provider,
-        moderation_provider=moderation_provider,
         prompt_builder=prompt_builder,
         memory_service=memory_service,
         settings=settings,

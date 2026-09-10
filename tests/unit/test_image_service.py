@@ -5,25 +5,16 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.core.config import Settings
-from app.core.exceptions import ModerationBlockedError, ProviderError, ValidationError
+from app.core.exceptions import ProviderError, ValidationError
 from app.core.security import AuthContext
 from app.images.base import ImageGenerationResult
-from app.moderation.base import ModerationResult
 from app.schemas.media import ImageGenerationRequest
 from app.services.image_service import ImageService
 from app.storage.base import StoredObject
-
-
-def _moderation(flagged: bool = False) -> ModerationResult:
-    return ModerationResult(
-        flagged=flagged,
-        categories={"sexual/minors": flagged, "violence": False},
-        category_scores={},
-        raw_response={},
-    )
 
 
 def _auth(*, trusted: bool = False) -> AuthContext:
@@ -103,10 +94,6 @@ def _service(tmp_path) -> tuple[ImageService, SimpleNamespace]:
                 )
             )
         ),
-        moderation_provider=SimpleNamespace(
-            moderate_text=AsyncMock(return_value=_moderation()),
-            moderate_multimodal=AsyncMock(return_value=_moderation()),
-        ),
         storage=SimpleNamespace(
             put=AsyncMock(
                 return_value=StoredObject(
@@ -120,14 +107,13 @@ def _service(tmp_path) -> tuple[ImageService, SimpleNamespace]:
         user_repo=SimpleNamespace(
             get_or_create_by_external_user_id=AsyncMock(return_value=user)
         ),
-        companion_repo=SimpleNamespace(get_by_id=AsyncMock(return_value=companion)),
+        companion_service=SimpleNamespace(get_active_profile=AsyncMock(return_value=companion)),
         conversation_repo=SimpleNamespace(
             get_by_id_for_user=AsyncMock(return_value=conversation)
         ),
         message_repo=deps.message_repo,
         media_repo=media_repo,
         image_provider=deps.image_provider,
-        moderation_provider=deps.moderation_provider,
         storage=deps.storage,
         settings=Settings(
             _env_file=None,
@@ -139,7 +125,7 @@ def _service(tmp_path) -> tuple[ImageService, SimpleNamespace]:
     return service, deps
 
 
-async def test_image_request_uses_reference_moderates_stores_and_returns_private_url(
+async def test_image_request_uses_reference_stores_and_returns_private_url(
     tmp_path,
 ) -> None:
     service, deps = _service(tmp_path)
@@ -155,8 +141,6 @@ async def test_image_request_uses_reference_moderates_stores_and_returns_private
     references = deps.image_provider.generate.await_args.kwargs["reference_images"]
     assert len(references) == 1
     assert references[0].filename == "lina-reference.png"
-    assert deps.moderation_provider.moderate_text.await_count == 2
-    deps.moderation_provider.moderate_multimodal.assert_awaited_once()
     deps.storage.put.assert_awaited_once()
     assert response.media.url.endswith(str(response.media.id))
     assert "storage" not in response.media.url
@@ -177,23 +161,6 @@ async def test_contextual_image_requires_trusted_backend(tmp_path) -> None:
     deps.image_provider.generate.assert_not_awaited()
 
 
-async def test_generated_image_is_not_stored_when_output_moderation_blocks(tmp_path) -> None:
-    service, deps = _service(tmp_path)
-    deps.moderation_provider.moderate_multimodal.return_value = _moderation(True)
-    request = ImageGenerationRequest(
-        conversation_id=deps.conversation.id,
-        companion_id=deps.companion.id,
-        prompt="Safe request that produces unsafe provider output",
-        idempotency_key=uuid.uuid4(),
-    )
-
-    with pytest.raises(ModerationBlockedError):
-        await service.generate(_auth(), request)
-
-    deps.storage.put.assert_not_awaited()
-    deps.session.commit.assert_awaited_once()  # safety audit event
-
-
 async def test_missing_reference_fails_before_paid_generation(tmp_path) -> None:
     service, deps = _service(tmp_path)
     deps.companion.visual_config["reference_images"] = []
@@ -206,6 +173,20 @@ async def test_missing_reference_fails_before_paid_generation(tmp_path) -> None:
     with pytest.raises(ProviderError, match="no reference image"):
         await service.generate(_auth(), request)
     deps.image_provider.generate.assert_not_awaited()
+
+
+async def test_downloads_catalogue_reference_image_from_allowed_host(tmp_path) -> None:
+    service, _deps = _service(tmp_path)
+    service.reference_image_transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"\x89PNG\r\n\x1a\nreference")
+    )
+
+    references = await service._load_reference_images(
+        {"reference_images": ["https://res.cloudinary.com/demo/image/upload/luna.png"]}
+    )
+
+    assert references[0].filename == "luna.png"
+    assert references[0].mime_type == "image/png"
 
 
 async def test_invalid_provider_image_is_rejected_before_storage(tmp_path) -> None:
@@ -226,7 +207,6 @@ async def test_invalid_provider_image_is_rejected_before_storage(tmp_path) -> No
     with pytest.raises(ProviderError, match="invalid image data"):
         await service.generate(_auth(), request)
 
-    deps.moderation_provider.moderate_multimodal.assert_not_awaited()
     deps.storage.put.assert_not_awaited()
 
 

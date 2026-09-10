@@ -2,7 +2,7 @@
 
 This repository is the AI/media service for Meet Elysia. It owns companion
 personas, Grok conversation generation, memory and relationship continuity,
-moderation, ElevenLabs speech, GPT image generation, private media storage,
+ElevenLabs speech, Grok Imagine image generation with GPT fallback, private media storage,
 and companion-world story context.
 
 The main backend owns end-user authentication, profiles, companion access,
@@ -13,15 +13,13 @@ companion reference to this service.
 
 ## Implemented flows
 
-- Text: trusted identity → moderation → persona/history/memory/story context →
-  Grok 4.6 → output moderation → persistence.
+- Text: trusted identity → persona/history/memory/story context → Grok 4.6 → persistence.
 - Voice input: validated audio → ElevenLabs Scribe STT → the same text-chat
   pipeline → optional, explicitly requested ElevenLabs TTS.
 - Voice output: a per-companion cloned voice ID, resolved from deployment
   configuration; no unnecessary automatic TTS.
-- Images: authorized request/contextual trigger → prompt moderation → approved
-  companion reference image + visual profile/history/story → GPT image edit →
-  multimodal output moderation → private storage.
+- Images: authorized request/contextual trigger → approved companion reference image +
+  visual profile/history/story → Grok Imagine image edit (GPT image fallback) → private storage.
 - Proactive interactions: the main backend schedules an eligible notification;
   this service generates the contextual text or optional voice response.
 - Living-world continuity: the backend/social pipeline upserts global companion
@@ -38,9 +36,15 @@ Copy `.env.example` to `.env`, populate development credentials, then run:
 
 ```powershell
 docker compose up --build
-docker compose exec app alembic upgrade head
-docker compose exec app python -m app.scripts.seed_companions
 ```
+
+The Compose stack starts PostgreSQL with pgvector, Redis, and the API. It
+automatically applies migrations and seeds the companion catalogue on startup.
+Authentication configuration is read from `.env`; for JWT authentication set
+`AUTH_MODE=jwt` and populate the matching `JWT_*` values there. Stop it with
+`docker compose down`. Its database and generated local media are stored in
+named Docker volumes, so they survive restarts. To reset this local environment
+completely, run `docker compose down --volumes`.
 
 Swagger UI is available at `http://localhost:8000/docs`. Liveness and readiness
 are `GET /health` and `GET /health/ready`; readiness checks the database, Redis,
@@ -108,8 +112,8 @@ Provider keys, cloned voice IDs, and licensed reference images are deployment
 assets and are intentionally absent from source control.
 
 ```env
-XAI_API_KEY=
-OPENAI_API_KEY=
+XAI_API_KEY= # preferred for Grok Imagine image generation
+OPENAI_API_KEY= # automatic GPT Image fallback
 ELEVENLABS_API_KEY=
 
 COMPANION_VOICE_ID_MAP={"elena":"...","chloe":"...","thalia":"...","lina":"...","luna":"..."}
@@ -127,9 +131,11 @@ Reference paths are relative to `COMPANION_ASSET_ROOT`; see
 `config/companion_assets/README.md`. Run the companion seed after changing either
 mapping. Features fail closed if a required provider key, voice ID, reference
 asset, or backend grant is missing.
-The `/api/v1/chat` endpoint also recognizes conservative natural-language image
-requests (including the companion-photo examples from the product brief), while
-ordinary photo-related conversation remains on the text pipeline.
+`/api/v1/chat` is the unified public chat endpoint. It continues to accept its
+original JSON text body and also accepts `multipart/form-data` with an optional
+`audio` file. Explicit photo requests automatically return an image; audio
+input automatically returns a spoken reply. Voice IDs remain server-only
+deployment configuration.
 
 `MEDIA_STORAGE_BACKEND=local` writes opaque files under `MEDIA_STORAGE_ROOT`.
 For production, mount that directory as durable private storage. A multi-instance

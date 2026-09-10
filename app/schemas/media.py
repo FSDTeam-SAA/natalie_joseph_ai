@@ -21,6 +21,7 @@ class ImageGenerationRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2000)
     trigger: Literal["user_requested", "contextual"] = "user_requested"
     idempotency_key: uuid.UUID
+    user_message_type: Literal["text", "audio"] = "text"
 
 
 class ImageGenerationResponse(BaseModel):

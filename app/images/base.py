@@ -16,6 +16,7 @@ class ImageGenerationResult:
     data: bytes
     mime_type: str
     model: str
+    provider: str = "openai"
     revised_prompt: str | None = None
     usage: dict[str, int | float | str] = field(default_factory=dict)
 

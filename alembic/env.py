@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
+import ssl
 from logging.config import fileConfig
 
 import sqlalchemy as sa
-from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import create_engine, pool
+from sqlalchemy.engine import Connection, make_url
 
 from alembic import context
 from app.core.config import get_settings
@@ -22,7 +21,6 @@ from app.db.models import (  # noqa: F401
     Memory,
     Message,
     RelationshipContext,
-    SafetyEvent,
     StoryEvent,
     User,
 )
@@ -75,24 +73,38 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-async def run_migrations_online() -> None:
-    connect_args: dict = {"ssl": settings.DATABASE_SSL_MODE}
-    if settings.DATABASE_DISABLE_STATEMENT_CACHE:
-        connect_args["statement_cache_size"] = 0
+def run_migrations_online() -> None:
+    """Run Alembic with a synchronous driver, independent of greenlet.
 
-    connectable = create_async_engine(
-        settings.DATABASE_URL,
+    The application intentionally uses ``asyncpg``.  Alembic, however, runs
+    synchronous migration callbacks; adapting an AsyncEngine needs greenlet,
+    whose native Windows extension may be blocked by application-control
+    policies.  pg8000 is a pure-Python PostgreSQL driver, so migrations can
+    run without changing the application's runtime database driver.
+    """
+    migration_url = make_url(settings.DATABASE_URL).set(
+        drivername="postgresql+pg8000"
+    )
+    # A configured ``require`` setting is used by hosted PostgreSQL providers.
+    # ``prefer`` deliberately remains unencrypted for local Docker Postgres,
+    # whose default image does not enable TLS.
+    connect_args: dict = {}
+    if settings.DATABASE_SSL_MODE == "require":
+        connect_args["ssl_context"] = ssl.create_default_context()
+
+    connectable = create_engine(
+        migration_url,
         poolclass=pool.NullPool,
         connect_args=connect_args,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
+    with connectable.connect() as connection:
+        do_run_migrations(connection)
 
-    await connectable.dispose()
+    connectable.dispose()
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    asyncio.run(run_migrations_online())
+    run_migrations_online()

@@ -1,6 +1,6 @@
 """Natural-language routing for text chat and companion image requests.
 
-This layer deliberately contains no generation, moderation, persistence, or
+This layer deliberately contains no generation, persistence, or
 entitlement business logic.  It only recognizes conservative, explicit image
 requests and delegates them to :class:`ImageService`; every other message goes
 through the existing :class:`ChatService` pipeline.
@@ -129,6 +129,20 @@ class ImageRequestClassifier:
         return any(pattern.search(normalized) for pattern in self._REQUEST_PATTERNS)
 
 
+class VoiceResponseClassifier:
+    """Recognize explicit requests for a spoken companion reply."""
+
+    _PATTERN = re.compile(
+        r"\b(?:send|share|record|give|reply with)\b[^.!?]{0,80}"
+        r"\b(?:a )?(?:voice note|voice message|audio message|audio|voice)\b"
+        r"|\b(?:can|could|may)\s+i\s+hear\s+your\s+voice\b",
+        re.IGNORECASE,
+    )
+
+    def is_voice_request(self, text: str) -> bool:
+        return bool(self._PATTERN.search(" ".join(text.strip().split())))
+
+
 class ChatRoutingService:
     """Route one ordinary chat request through the correct existing service."""
 
@@ -163,6 +177,8 @@ class ChatRoutingService:
         auth: AuthContext,
         request: ChatRequest,
         background_tasks: BackgroundTasks,
+        *,
+        user_message_type: MessageType = MessageType.text,
     ) -> ChatResponse:
         # Without this check, routing an image before ChatService would let a
         # caller use the ordinary chat endpoint without a chat grant.
@@ -208,8 +224,13 @@ class ChatRoutingService:
                     prompt=request.message,
                     trigger="user_requested",
                     idempotency_key=request.idempotency_key,
+                    user_message_type=user_message_type.value,
                 ),
             )
             return self._as_chat_response(image)
 
-        return await self.chat_service.send_message(auth, request, background_tasks)
+        if user_message_type is MessageType.text:
+            return await self.chat_service.send_message(auth, request, background_tasks)
+        return await self.chat_service.send_message(
+            auth, request, background_tasks, user_message_type=user_message_type
+        )

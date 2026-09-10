@@ -5,6 +5,9 @@ pydantic-settings==2.5.2
  
 sqlalchemy[asyncio]==2.0.35
 asyncpg==0.29.0
+# Alembic's sync migration runner. Kept separate from asyncpg, which remains
+# the application's runtime driver; pure Python avoids greenlet on locked-down Windows.
+pg8000==1.31.2
 alembic==1.13.3
 pgvector==0.3.4
  

@@ -4,7 +4,7 @@ Companion API schemas.
 Per spec Section 23: companion endpoints must return only
 frontend-safe data. Explicitly excluded from these schemas:
   - hidden system prompt / prompt construction details
-  - internal safety rules / moderation configuration
+  - internal safety rules
   - provider configuration (model names, API details)
   - internal memory instructions
 

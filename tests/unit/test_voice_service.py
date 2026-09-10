@@ -46,6 +46,7 @@ def _service() -> tuple[VoiceService, SimpleNamespace]:
     user = SimpleNamespace(id=uuid.uuid4())
     companion = SimpleNamespace(
         id=uuid.uuid4(),
+        slug="lina",
         active=True,
         voice_config={"voice_id": "voice-lina", "settings": {"stability": 0.5}},
     )
@@ -69,7 +70,7 @@ def _service() -> tuple[VoiceService, SimpleNamespace]:
         assistant=assistant,
         chat=chat,
         user_repo=SimpleNamespace(get_or_create_by_external_user_id=AsyncMock(return_value=user)),
-        companion_repo=SimpleNamespace(get_by_id=AsyncMock(return_value=companion)),
+        companion_service=SimpleNamespace(get_active_profile=AsyncMock(return_value=companion)),
         conversation_repo=SimpleNamespace(get_by_id_for_user=AsyncMock(return_value=conversation)),
         message_repo=SimpleNamespace(
             session=session,
@@ -117,7 +118,7 @@ def _service() -> tuple[VoiceService, SimpleNamespace]:
     dependencies.media_repo.add.side_effect = add_asset
     service = VoiceService(
         user_repo=dependencies.user_repo,
-        companion_repo=dependencies.companion_repo,
+        companion_service=dependencies.companion_service,
         conversation_repo=dependencies.conversation_repo,
         message_repo=dependencies.message_repo,
         media_repo=dependencies.media_repo,
@@ -129,6 +130,7 @@ def _service() -> tuple[VoiceService, SimpleNamespace]:
             ENABLE_VOICE_GENERATION=True,
             ENABLE_VOICE_INPUT=True,
             ELEVENLABS_API_KEY="test",
+            COMPANION_VOICE_ID_MAP={"lina": "voice-lina"},
         ),
     )
     return service, dependencies
@@ -161,6 +163,7 @@ async def test_completed_voice_retry_reuses_media_without_second_tts() -> None:
         kind=SimpleNamespace(value="audio"),
         mime_type="audio/mpeg",
         byte_size=123,
+        asset_metadata={},
     )
     deps.media_repo.get_by_id_for_user.return_value = existing
 

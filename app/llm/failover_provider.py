@@ -13,7 +13,7 @@ class FailoverLLMProvider(LLMProvider):
 
     A fallback is attempted only for :class:`ProviderError`, which is the
     provider boundary's normalized failure type. Application validation and
-    moderation errors therefore never cause a second model request.
+    application validation errors therefore never cause a second model request.
     """
 
     def __init__(

@@ -21,7 +21,7 @@ router = APIRouter(tags=["AI Voice"])
     summary="Send a voice message through the normal chat pipeline",
     description=(
         "Validates and transcribes user audio, then uses the same companion, "
-        "history, memory, Grok, and moderation path as text chat. TTS is only "
+        "history, memory, and Grok path as text chat. TTS is only "
         "generated when request_voice_response=true and the backend grants it."
     ),
 )

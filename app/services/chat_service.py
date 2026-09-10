@@ -1,6 +1,5 @@
-"""Moderated Grok chat with persona, memory, story, and relationship continuity.
+"""Grok chat with persona, memory, story, and relationship continuity.
 
-Input and output are moderated around a single shared conversation pipeline.
 Only the trusted backend decides age and feature eligibility. User facts are
 retrieved synchronously for the current response; extraction, rolling summaries,
 and relationship progression run after the response is committed.
@@ -15,61 +14,22 @@ from datetime import UTC, datetime
 from fastapi import BackgroundTasks
 
 from app.core.config import Settings
-from app.core.exceptions import ModerationBlockedError, NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.security import AuthContext, require_feature
 from app.db.models.ai_event import AIEvent
 from app.db.models.message import Message, MessageRole, MessageType
-from app.db.models.safety_event import SafetyDirection, SafetyEvent
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.prompts.context import PromptContext
-from app.moderation.base import ModerationProvider, ModerationResult
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.repositories.relationship_repository import RelationshipRepository
 from app.repositories.story_event_repository import StoryEventRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.chat import ChatRequest, ChatResponse, ChatUsage
+from app.services.companion_service import CompanionService
 from app.services.memory_service import MemoryService
 from app.services.post_turn_processor import PostTurnProcessor
-from app.services.companion_service import CompanionService
-
-# Fallback text shown to the user when the model's own output is
-# flagged by moderation — the flagged text itself is never returned
-# or persisted as the assistant's message.
-OUTPUT_MODERATION_FALLBACK = (
-    "I want to be thoughtful about how I respond to that — could we talk about "
-    "something else, or rephrase what you're looking for?"
-)
-
-# The ONLY moderation category that becomes conditional on
-# adult_eligible. Every other category OpenAI flags -- sexual/minors,
-# violence, violence/graphic, hate, hate/threatening, harassment,
-# harassment/threatening, self-harm and its subcategories, illicit,
-# illicit/violent, etc. -- blocks unconditionally, regardless of
-# adult_eligible. This is a narrow, explicit allow-list, not a
-# general-purpose bypass: adding a category here should never be done
-# casually.
-ADULT_ELIGIBLE_ALLOWED_CATEGORIES = frozenset({"sexual"})
-
-
-def _moderation_blocks(result: ModerationResult, *, adult_eligible: bool) -> bool:
-    """
-    True if this moderation result should block the message.
-
-    Fail-closed: if a moderation call ever returns flagged=True with
-    an empty/missing categories dict (a malformed or unexpected
-    response), this blocks -- it never treats "no category detail" as
-    "safe to allow through".
-    """
-    if not result.flagged:
-        return False
-    flagged_categories = {cat for cat, is_flagged in result.categories.items() if is_flagged}
-    if not flagged_categories:
-        return True
-    if not adult_eligible:
-        return True
-    return not flagged_categories.issubset(ADULT_ELIGIBLE_ALLOWED_CATEGORIES)
 
 
 class ChatService:
@@ -82,7 +42,6 @@ class ChatService:
         message_repo: MessageRepository,
         relationship_repo: RelationshipRepository,
         llm_provider: LLMProvider,
-        moderation_provider: ModerationProvider,
         prompt_builder: PromptBuilder,
         memory_service: MemoryService,
         settings: Settings,
@@ -95,37 +54,11 @@ class ChatService:
         self.message_repo = message_repo
         self.relationship_repo = relationship_repo
         self.llm_provider = llm_provider
-        self.moderation_provider = moderation_provider
         self.prompt_builder = prompt_builder
         self.memory_service = memory_service
         self.settings = settings
         self.post_turn_processor = post_turn_processor
         self.story_repo = story_repo
-
-    async def _log_safety_event(
-        self,
-        *,
-        request_id: uuid.UUID,
-        user_id: uuid.UUID,
-        conversation_id: uuid.UUID,
-        direction: SafetyDirection,
-        moderation_result: ModerationResult,
-        action: str,
-    ) -> None:
-        flagged_categories = [
-            cat for cat, flagged in moderation_result.categories.items() if flagged
-        ]
-        event = SafetyEvent(
-            request_id=request_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            direction=direction,
-            category=", ".join(flagged_categories) if flagged_categories else None,
-            severity=None,
-            action=action,
-        )
-        self.message_repo.session.add(event)
-        await self.message_repo.session.flush()
 
     async def send_message(
         self,
@@ -198,46 +131,10 @@ class ChatService:
                 await self.message_repo.session.commit()
                 return response
 
-        # --- Input moderation (spec Section 26) ---
-        # Category-aware + adult_eligible-aware: "sexual" alone is let
-        # through for adult-verified users so they can actually
-        # express what they want to talk about; every other flagged
-        # category still blocks unconditionally. See
-        # _moderation_blocks()'s docstring above.
-        input_moderation = await self.moderation_provider.moderate_text(
-            request.message, model=self.settings.OPENAI_MODERATION_MODEL
-        )
-        if _moderation_blocks(input_moderation, adult_eligible=auth.adult_eligible):
-            await self._log_safety_event(
-                request_id=request_id,
-                user_id=user.id,
-                conversation_id=conversation.id,
-                direction=SafetyDirection.input,
-                moderation_result=input_moderation,
-                action="blocked",
-            )
-            await self.message_repo.session.commit()
-            raise ModerationBlockedError(
-                "Your message couldn't be processed. Please rephrase and try again."
-            )
-        if input_moderation.flagged:
-            # Flagged but allowed through (adult_eligible + sexual-only).
-            # Logged for audit, not blocking.
-            await self._log_safety_event(
-                request_id=request_id,
-                user_id=user.id,
-                conversation_id=conversation.id,
-                direction=SafetyDirection.input,
-                moderation_result=input_moderation,
-                action="allowed_adult_content",
-            )
-
         # --- Basic relationship_context wiring (spec Section 32) ---
         # Fetch-or-create is idempotent; the row is flushed into this
         # same session/transaction and committed with everything else
-        # below, so a blocked (moderation-flagged) message never
-        # creates one — this only runs on the path that will actually
-        # generate a reply.
+        # below, so it runs only on the path that will generate a reply.
         relationship_context = await self.relationship_repo.get_or_create(
             user.id, companion.id
         )
@@ -291,31 +188,7 @@ class ChatService:
         )
         latency_ms = (time.perf_counter() - start) * 1000
 
-        # --- Output moderation (spec Section 26) ---
-        # Same gate as input moderation above.
-        output_moderation = await self.moderation_provider.moderate_text(
-            result.text, model=self.settings.OPENAI_MODERATION_MODEL
-        )
         final_text = result.text
-        if _moderation_blocks(output_moderation, adult_eligible=auth.adult_eligible):
-            await self._log_safety_event(
-                request_id=request_id,
-                user_id=user.id,
-                conversation_id=conversation.id,
-                direction=SafetyDirection.output,
-                moderation_result=output_moderation,
-                action="blocked",
-            )
-            final_text = OUTPUT_MODERATION_FALLBACK
-        elif output_moderation.flagged:
-            await self._log_safety_event(
-                request_id=request_id,
-                user_id=user.id,
-                conversation_id=conversation.id,
-                direction=SafetyDirection.output,
-                moderation_result=output_moderation,
-                action="allowed_adult_content",
-            )
 
         # --- Persist user + assistant messages ---
         user_message = Message(

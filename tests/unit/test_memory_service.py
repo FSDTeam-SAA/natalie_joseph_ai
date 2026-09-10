@@ -16,7 +16,11 @@ import pytest
 
 from app.db.models.memory import MemoryType
 from app.llm.base import LLMUsage
-from app.services.memory_service import MemoryService, _cosine_similarity
+from app.services.memory_service import (
+    MemoryService,
+    _cosine_similarity,
+    _explicit_profile_memories,
+)
 
 
 def _fake_settings(**overrides) -> SimpleNamespace:
@@ -74,6 +78,7 @@ class TestRetrieveRelevant:
         close_memory = _fake_memory(key="pet_name", value="Rex", embedding=[1.0, 0.0, 0.0])
         far_memory = _fake_memory(key="unrelated", value="noise", embedding=[0.0, 1.0, 0.0])
         mocks["memory_repo"].search_similar.return_value = [close_memory, far_memory]
+        mocks["memory_repo"].list_active_by_keys.return_value = []
 
         result = await service.retrieve_relevant(
             user_id=uuid.uuid4(), companion_id=uuid.uuid4(), query_text="tell me about my dog"
@@ -87,6 +92,7 @@ class TestRetrieveRelevant:
             vector=[1.0, 0.0], model="x", dimensions=2
         )
         mocks["memory_repo"].search_similar.return_value = []
+        mocks["memory_repo"].list_active_by_keys.return_value = []
         user_id, companion_id = uuid.uuid4(), uuid.uuid4()
 
         await service.retrieve_relevant(user_id=user_id, companion_id=companion_id, query_text="hi")
@@ -99,6 +105,7 @@ class TestRetrieveRelevant:
 
     async def test_embedding_failure_degrades_to_empty_list(self) -> None:
         service, mocks = _make_service()
+        mocks["memory_repo"].list_active_by_keys.return_value = []
         mocks["embedding_provider"].embed_text.side_effect = RuntimeError("network down")
 
         result = await service.retrieve_relevant(
@@ -112,11 +119,57 @@ class TestRetrieveRelevant:
             vector=[1.0, 0.0], model="x", dimensions=2
         )
         mocks["memory_repo"].search_similar.side_effect = RuntimeError("db down")
+        mocks["memory_repo"].list_active_by_keys.return_value = []
 
         result = await service.retrieve_relevant(
             user_id=uuid.uuid4(), companion_id=uuid.uuid4(), query_text="hi"
         )
         assert result == []
+
+    async def test_returns_profile_memory_when_embedding_retrieval_fails(self) -> None:
+        service, mocks = _make_service()
+        mocks["memory_repo"].list_active_by_keys.return_value = [
+            _fake_memory(key="preferred_name", value="Jack", embedding=[1.0, 0.0])
+        ]
+        mocks["embedding_provider"].embed_text.side_effect = RuntimeError("network down")
+
+        result = await service.retrieve_relevant(
+            user_id=uuid.uuid4(), companion_id=uuid.uuid4(), query_text="What is my name?"
+        )
+
+        assert result == ["preferred_name: Jack"]
+
+
+def test_explicit_profile_name_is_extracted_without_llm() -> None:
+    candidates = _explicit_profile_memories("Call me Jack, please.")
+
+    assert [(candidate.key, candidate.value, candidate.confidence) for candidate in candidates] == [
+        ("preferred_name", "Jack", 1.0)
+    ]
+
+
+async def test_explicit_profile_name_survives_an_embedding_outage() -> None:
+    service, mocks = _make_service()
+    mocks["llm_provider"].generate_structured.return_value = SimpleNamespace(
+        data={"memories": []},
+        usage=LLMUsage(input_tokens=10, output_tokens=5),
+        model="gpt-5.6-luna",
+    )
+    mocks["embedding_provider"].embed_text.side_effect = RuntimeError("embedding api down")
+    mocks["memory_repo"].find_existing_by_key.return_value = None
+
+    await service.extract_and_store(
+        conversation_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        companion_id=uuid.uuid4(),
+        user_message="My name is Jack.",
+        assistant_message="Nice to meet you, Jack.",
+    )
+
+    stored = mocks["memory_repo"].add.await_args.args[0]
+    assert stored.key == "preferred_name"
+    assert stored.value == "Jack"
+    assert stored.embedding == [0.0] * 1536
 
 
 class TestExtractAndStore:

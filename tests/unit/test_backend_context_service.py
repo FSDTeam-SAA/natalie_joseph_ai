@@ -39,14 +39,14 @@ async def test_resolves_backend_companion_and_creates_durable_conversation() -> 
         return conversation
 
     conversation_repo.add.side_effect = add_conversation
-    companion_repo = SimpleNamespace(
-        resolve_backend_reference=AsyncMock(return_value=companion)
+    companion_service = SimpleNamespace(
+        get_active_profile_by_reference=AsyncMock(return_value=companion)
     )
     service = BackendContextService(
         user_repo=SimpleNamespace(
             get_or_create_by_external_user_id=AsyncMock(return_value=user)
         ),
-        companion_repo=companion_repo,
+        companion_service=companion_service,
         conversation_repo=conversation_repo,
         settings=Settings(
             _env_file=None,
@@ -62,16 +62,14 @@ async def test_resolves_backend_companion_and_creates_durable_conversation() -> 
 
     assert result.companion is companion
     assert result.conversation.external_conversation_id is not None
-    companion_repo.resolve_backend_reference.assert_awaited_once_with(
-        "backend-lina", id_map={"backend-lina": "lina"}
-    )
+    companion_service.get_active_profile_by_reference.assert_awaited_once_with("lina")
     session.commit.assert_awaited_once()
 
 
 async def test_backend_context_rejects_direct_client_identity() -> None:
     service = BackendContextService(
         user_repo=SimpleNamespace(),
-        companion_repo=SimpleNamespace(),
+        companion_service=SimpleNamespace(),
         conversation_repo=SimpleNamespace(),
         settings=Settings(_env_file=None),
     )

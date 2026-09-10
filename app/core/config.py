@@ -45,6 +45,7 @@ class MediaStorageBackend(str, Enum):
     """Storage adapters supported by this service."""
 
     local = "local"
+    cloudinary = "cloudinary"
 
 
 class Settings(BaseSettings):
@@ -108,15 +109,13 @@ class Settings(BaseSettings):
     OPENAI_CHAT_MODEL: str = "gpt-5.6-terra"
 
     # ------------------------------------------------------------------
-    # xAI — conversational provider
-    # Grok owns user-facing conversation only. OpenAI remains the
-    # independent provider for embeddings, moderation, memory extraction,
-    # and image generation.
+    # xAI — conversation and preferred image-generation provider.
     # ------------------------------------------------------------------
     XAI_API_KEY: str = ""
     XAI_BASE_URL: str = "https://api.x.ai/v1"
     XAI_MODEL: str = "grok-4.6"
     XAI_REASONING_EFFORT: Literal["low", "medium", "high", "xhigh"] = "low"
+    XAI_IMAGE_MODEL: str = "grok-imagine-image-2.0"
     CHAT_MAX_OUTPUT_TOKENS: int = Field(default=800, gt=0, le=8192)
     PROVIDER_TIMEOUT_SECONDS: float = Field(default=45.0, gt=0, le=300)
     PROVIDER_MAX_RETRIES: int = Field(default=2, ge=0, le=10)
@@ -139,7 +138,6 @@ class Settings(BaseSettings):
     OPENAI_BACKGROUND_MODEL: str = "gpt-5.6-luna"
     OPENAI_REASONING_MODEL: str = "gpt-5.6-sol"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
-    OPENAI_MODERATION_MODEL: str = "omni-moderation-latest"
     OPENAI_IMAGE_MODEL: str = "gpt-image-2"
 
     # ------------------------------------------------------------------
@@ -256,11 +254,16 @@ class Settings(BaseSettings):
     IMAGE_OUTPUT_QUALITY: str = "medium"
     MAX_REFERENCE_IMAGE_BYTES: int = Field(default=20 * 1024 * 1024, gt=0)
     COMPANION_ASSET_ROOT: str = "config/companion_assets"
+    COMPANION_REFERENCE_IMAGE_ALLOWED_HOSTS: list[str] = ["res.cloudinary.com"]
 
     MEDIA_STORAGE_BACKEND: MediaStorageBackend = MediaStorageBackend.local
     MEDIA_STORAGE_ROOT: str = "storage/media"
     MEDIA_URL_PREFIX: str = "/api/v1/media"
     MAX_GENERATED_MEDIA_BYTES: int = Field(default=25 * 1024 * 1024, gt=0)
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+    CLOUDINARY_FOLDER: str = "meet-elysia"
 
     # ------------------------------------------------------------------
     # Rate limiting (Redis-backed, configured not hard-coded)

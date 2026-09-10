@@ -96,6 +96,28 @@ class MemoryRepository(BaseRepository[Memory]):
         )
         return result.scalar_one_or_none()
 
+    async def list_active_by_keys(
+        self, *, user_id: uuid.UUID, companion_id: uuid.UUID, keys: set[str]
+    ) -> list[Memory]:
+        """Return exact-key memories without depending on vector similarity.
+
+        Used for small, high-value profile facts such as a user's preferred
+        name. These facts must remain available even when embeddings are
+        temporarily unavailable or a wording change makes semantic matching
+        too weak.
+        """
+        if not keys:
+            return []
+        result = await self.session.execute(
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.companion_id == companion_id,
+                Memory.active.is_(True),
+                Memory.key.in_(keys),
+            )
+        )
+        return list(result.scalars().all())
+
     async def list_active_for_user(
         self, user_id: uuid.UUID, *, memory_type: MemoryType | None = None
     ) -> list[Memory]:

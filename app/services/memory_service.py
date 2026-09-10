@@ -61,7 +61,7 @@ from pydantic import ValidationError
 from app.core.config import Settings
 from app.core.exceptions import ProviderError
 from app.db.models.ai_event import AIEvent
-from app.db.models.memory import Memory
+from app.db.models.memory import EMBEDDING_DIMENSIONS, Memory
 from app.embeddings.base import EmbeddingProvider
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.schemas.memory_extraction import (
@@ -98,6 +98,87 @@ _INSTRUCTION_LIKE_MEMORY = re.compile(
     re.IGNORECASE,
 )
 
+_PROFILE_MEMORY_KEYS = frozenset(
+    {
+        "preferred_name",
+        "preferred_nickname",
+        "user_name",
+        "user_nickname",
+        "name",
+        "nickname",
+        "pronouns",
+    }
+)
+_PROFILE_MEMORY_ORDER = {
+    "preferred_name": 0,
+    "preferred_nickname": 1,
+    "user_name": 2,
+    "user_nickname": 3,
+    "name": 4,
+    "nickname": 5,
+    "pronouns": 6,
+}
+_NAME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "preferred_name",
+        re.compile(
+            r"\b(?:my\s+name\s+is|i\s+am|i['’]m)\s+"
+            r"(?P<value>[A-Za-z][A-Za-z' -]{0,78})",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "preferred_name",
+        re.compile(
+            r"\b(?:call\s+me|you\s+can\s+call\s+me)\s+"
+            r"(?P<value>[A-Za-z][A-Za-z' -]{0,78})",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_PRONOUN_PATTERN = re.compile(
+    r"\bmy\s+pronouns\s+(?:are|is)\s+(?P<value>[A-Za-z/ ]{2,40})",
+    re.IGNORECASE,
+)
+
+
+def _clean_profile_value(value: str) -> str:
+    """Keep the user-provided value, stopping before common sentence continuations."""
+    value = re.split(
+        r"[.!?,;]|\s+(?:and|but|please|now)\b",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return " ".join(value.split()).strip(" -'")
+
+
+def _explicit_profile_memories(user_message: str) -> list[ExtractedMemoryCandidate]:
+    """Extract critical user profile facts without relying on a background LLM."""
+    candidates: list[ExtractedMemoryCandidate] = []
+    for key, pattern in _NAME_PATTERNS:
+        match = pattern.search(user_message)
+        if match is None:
+            continue
+        value = _clean_profile_value(match.group("value"))
+        if value:
+            candidates.append(
+                ExtractedMemoryCandidate(
+                    memory_type="fact", key=key, value=value, confidence=1.0
+                )
+            )
+        break
+    pronouns_match = _PRONOUN_PATTERN.search(user_message)
+    if pronouns_match is not None:
+        value = _clean_profile_value(pronouns_match.group("value"))
+        if value:
+            candidates.append(
+                ExtractedMemoryCandidate(
+                    memory_type="fact", key="pronouns", value=value, confidence=1.0
+                )
+            )
+    return candidates
+
 
 def _is_safe_memory(candidate: ExtractedMemoryCandidate) -> bool:
     combined = f"{candidate.key} {candidate.value}"
@@ -131,6 +212,18 @@ class MemoryService:
         self, *, user_id: uuid.UUID, companion_id: uuid.UUID, query_text: str
     ) -> list[str]:
         try:
+            profile_memories = await self.memory_repo.list_active_by_keys(
+                user_id=user_id,
+                companion_id=companion_id,
+                keys=set(_PROFILE_MEMORY_KEYS),
+            )
+        except Exception:  # noqa: BLE001 - retrieval must never break chat
+            logger.exception("profile_memory_retrieval_failed", extra={"user_id": str(user_id)})
+            profile_memories = []
+
+        profile_memories.sort(key=lambda memory: _PROFILE_MEMORY_ORDER.get(memory.key, 99))
+        relevant = [f"{memory.key}: {memory.value}" for memory in profile_memories]
+        try:
             embedding_result = await self.embedding_provider.embed_text(
                 query_text, model=self.settings.OPENAI_EMBEDDING_MODEL
             )
@@ -143,12 +236,12 @@ class MemoryService:
             )
         except Exception:  # noqa: BLE001 - retrieval must never break chat
             logger.exception("memory_retrieval_failed", extra={"user_id": str(user_id)})
-            return []
+            return relevant
 
-        relevant: list[str] = []
         for memory in candidates:
             score = _cosine_similarity(embedding_result.vector, memory.embedding)
-            if score >= self.settings.MEMORY_MIN_SCORE:
+            formatted = f"{memory.key}: {memory.value}"
+            if score >= self.settings.MEMORY_MIN_SCORE and formatted not in relevant:
                 relevant.append(f"{memory.key}: {memory.value}")
         return relevant
 
@@ -162,6 +255,17 @@ class MemoryService:
         assistant_message: str,
         source_message_id: uuid.UUID | None = None,
     ) -> None:
+        # Identity/profile facts are too important to leave to an LLM's
+        # judgment. Store explicit statements first; semantic extraction below
+        # continues to handle broader preferences, interests, and life facts.
+        for candidate in _explicit_profile_memories(user_message):
+            await self._upsert_memory(
+                user_id=user_id,
+                companion_id=companion_id,
+                candidate=candidate,
+                source_message_id=source_message_id,
+                allow_embedding_failure=True,
+            )
         try:
             extraction_result = await self.llm_provider.generate_structured(
                 [
@@ -213,6 +317,8 @@ class MemoryService:
         )
 
         for candidate in candidates:
+            if candidate.key.strip().lower() in _PROFILE_MEMORY_KEYS:
+                continue
             if not _is_safe_memory(candidate):
                 logger.warning(
                     "memory_candidate_rejected_as_instruction",
@@ -235,6 +341,7 @@ class MemoryService:
         companion_id: uuid.UUID,
         candidate: ExtractedMemoryCandidate,
         source_message_id: uuid.UUID | None,
+        allow_embedding_failure: bool = False,
     ) -> None:
         try:
             embedding_result = await self.embedding_provider.embed_text(
@@ -242,7 +349,14 @@ class MemoryService:
             )
         except Exception:  # noqa: BLE001
             logger.exception("memory_embedding_failed", extra={"key": candidate.key})
-            return
+            if not allow_embedding_failure:
+                return
+            # Exact-key profile lookup does not use a vector. A zero vector lets
+            # names and pronouns survive a transient embedding outage and will
+            # be replaced by a real embedding on the next profile update.
+            embedding = [0.0] * EMBEDDING_DIMENSIONS
+        else:
+            embedding = embedding_result.vector
 
         await self.memory_repo.acquire_key_lock(
             user_id=user_id,
@@ -256,7 +370,7 @@ class MemoryService:
             existing.value = candidate.value
             existing.memory_type = candidate.memory_type
             existing.confidence = candidate.confidence
-            existing.embedding = embedding_result.vector
+            existing.embedding = embedding
             existing.source_message_id = source_message_id
             existing.active = True
             await self.memory_repo.session.flush()
@@ -268,7 +382,7 @@ class MemoryService:
                     memory_type=candidate.memory_type,
                     key=candidate.key,
                     value=candidate.value,
-                    embedding=embedding_result.vector,
+                    embedding=embedding,
                     confidence=candidate.confidence,
                     privacy_class=None,
                     source_message_id=source_message_id,

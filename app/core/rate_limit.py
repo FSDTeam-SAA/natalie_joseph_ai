@@ -58,6 +58,7 @@ class RateLimiter:
         now = int(time.time())
         user_subject = self._subject(str(auth.user_id))
         try:
+            print("\n\nRedis Working!!!!!!\n")
             per_minute = await self._increment(
                 f"elysia:limit:user:{user_subject}:{now // 60}", ttl=70
             )

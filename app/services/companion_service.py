@@ -48,6 +48,26 @@ class CompanionService:
         # identifier; this is retained only for compatibility with existing UI.
         return "-".join(str(profile["name"]).lower().split())
 
+    @staticmethod
+    def _reference_image_urls(profile: dict) -> list[str]:
+        """Collect every usable remote image supplied by the companion profile."""
+        raw_profile_image = profile.get("profileImage")
+        profile_image = (
+            raw_profile_image.strip()
+            if isinstance(raw_profile_image, str) and raw_profile_image.strip()
+            else None
+        )
+        raw_gallery_images = profile.get("galleryImages", [])
+        gallery_images = (
+            raw_gallery_images if isinstance(raw_gallery_images, list) else []
+        )
+
+        images: list[str] = []
+        for image in ([profile_image] if profile_image else []) + gallery_images:
+            if isinstance(image, str) and image.strip() and image.strip() not in images:
+                images.append(image.strip())
+        return images
+
     @classmethod
     def _to_summary(cls, profile: dict) -> CompanionSummary:
         return CompanionSummary(
@@ -89,9 +109,14 @@ class CompanionService:
             raise ProviderError("The companion catalogue returned invalid data.") from exc
         lifestyle = profile.get("lifestyle")
         communication_style = profile.get("communicationStyle")
+        slug = self._slug(profile)
+        # The companion catalogue is the source of truth for character
+        # identity. Its profile image is used first, followed by gallery images;
+        # local deployment assets must not override these remote references.
+        reference_images = self._reference_image_urls(profile)
         return CompanionProfile(
             id=companion_id,
-            slug=self._slug(profile),
+            slug=slug,
             name=name,
             active=bool(profile.get("status", False)),
             version=1,
@@ -111,7 +136,7 @@ class CompanionService:
             },
             interest_config={"interests": profile.get("interests", [])},
             visual_config={
-                "reference_images": profile.get("galleryImages", []),
+                "reference_images": reference_images,
                 "reference_image": profile.get("profileImage"),
                 "aesthetic_keywords": [],
             },

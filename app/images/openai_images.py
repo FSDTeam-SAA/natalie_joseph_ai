@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 from typing import Any
 
 from openai import APIError, AsyncOpenAI
 
 from app.core.exceptions import ProviderError
 from app.images.base import ImageGenerationResult, ImageProvider, ReferenceImage
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIImageProvider(ImageProvider):
@@ -52,6 +55,7 @@ class OpenAIImageProvider(ImageProvider):
             data=image_bytes,
             mime_type="image/png",
             model=model,
+            provider="openai",
             revised_prompt=getattr(first, "revised_prompt", None),
             usage=usage,
         )
@@ -91,5 +95,16 @@ class OpenAIImageProvider(ImageProvider):
                     output_format="png",
                 )
         except APIError as exc:
+            # Keep provider text out of the API response: it may expose account
+            # or request details. Status and request ID are sufficient to
+            # diagnose credentials, access, quota, and malformed requests.
+            logger.warning(
+                "openai_image_generation_failed",
+                extra={
+                    "openai_status_code": getattr(exc, "status_code", None),
+                    "openai_request_id": getattr(exc, "request_id", None),
+                    "openai_error_code": getattr(exc, "code", None),
+                },
+            )
             raise ProviderError("OpenAI image generation failed.") from exc
         return self._decode_response(response, model=model)

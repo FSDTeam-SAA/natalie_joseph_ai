@@ -1,48 +1,55 @@
 services:
-  app:
-    build: .
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/meet_elysia
-      DATABASE_SSL_MODE: disable
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    volumes:
-      - .:/app
-      - media:/app/storage/media
-    command: >-
-      sh -c "alembic upgrade head &&
-      python -m app.scripts.seed_companions &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-
-  postgres:
+  db:
     image: pgvector/pgvector:pg16
     environment:
+      POSTGRES_DB: meet_elysia
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: meet_elysia
-    ports:
-      - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d meet_elysia"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
 
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      # Docker service names replace the localhost values used outside Docker.
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/meet_elysia
+      DATABASE_SSL_MODE: disable
+      REDIS_URL: redis://redis:6379/0
+      # Authentication settings intentionally come from .env. Set AUTH_MODE=jwt
+      # there to use your existing JWT configuration in the container.
+    command: >
+      sh -c "alembic upgrade head && python -m app.scripts.seed_companions &&
+      exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
-      - "6379:6379"
+      - "8000:8000"
+    volumes:
+      - media_data:/app/storage/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
-  pgdata:
-  media:
+  postgres_data:
+  redis_data:
+  media_data:

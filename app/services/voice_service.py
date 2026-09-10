@@ -20,6 +20,7 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.chat import ChatRequest, ChatResponse, ChatUsage
 from app.schemas.media import MediaDescriptor
 from app.schemas.voice import VoiceChatResponse
+from app.services.chat_routing_service import ChatRoutingService
 from app.services.chat_service import ChatService
 from app.services.companion_service import CompanionProfile, CompanionService
 from app.storage.base import MediaStorage, StoredObject
@@ -82,6 +83,7 @@ class VoiceService:
         message_repo: MessageRepository,
         media_repo: MediaRepository,
         chat_service: ChatService | None,
+        chat_routing_service: ChatRoutingService | None = None,
         voice_provider: VoiceProvider,
         storage: MediaStorage,
         settings: Settings,
@@ -92,6 +94,7 @@ class VoiceService:
         self.message_repo = message_repo
         self.media_repo = media_repo
         self.chat_service = chat_service
+        self.chat_routing_service = chat_routing_service
         self.voice_provider = voice_provider
         self.storage = storage
         self.settings = settings
@@ -100,6 +103,22 @@ class VoiceService:
         if self.chat_service is None:
             raise ProviderError("The chat pipeline is unavailable for this voice operation.")
         return self.chat_service
+
+    async def _route_message(
+        self,
+        auth: AuthContext,
+        request: ChatRequest,
+        background_tasks,
+        *,
+        user_message_type: MessageType = MessageType.text,
+    ) -> ChatResponse:
+        if self.chat_routing_service is not None:
+            return await self.chat_routing_service.send_message(
+                auth, request, background_tasks, user_message_type=user_message_type
+            )
+        return await self._chat_service().send_message(
+            auth, request, background_tasks, user_message_type=user_message_type
+        )
 
     async def _finish_attempt(self, attempt: AIEvent, status: str, **metadata: object) -> None:
         attempt.event_metadata = {
@@ -124,7 +143,8 @@ class VoiceService:
         return MediaDescriptor(
             id=asset.id,
             kind=asset.kind.value,
-            url=f"{self.settings.MEDIA_URL_PREFIX.rstrip('/')}/{asset.id}",
+            url=(asset.asset_metadata or {}).get("public_url")
+            or f"{self.settings.MEDIA_URL_PREFIX.rstrip('/')}/{asset.id}",
             mime_type=asset.mime_type,
             byte_size=asset.byte_size,
         )
@@ -297,6 +317,7 @@ class VoiceService:
                     asset_metadata={
                         "character_cost": synthesis.usage.character_cost,
                         "provider_request_id": synthesis.usage.request_id,
+                        "public_url": stored.public_url,
                     },
                 )
             )
@@ -412,7 +433,7 @@ class VoiceService:
             await self.message_repo.session.commit()
             return VoiceChatResponse(
                 **chat.model_dump(exclude={"media", "transcript", "message_type"}),
-                message_type=MessageType.audio.value,
+                message_type=assistant.message_type.value,
                 transcript=user_message.content,
                 media=self._media_descriptor(asset),
             )
@@ -451,7 +472,7 @@ class VoiceService:
             auth, conversation_id=conversation_id, companion_id=companion_id
         )
         voice_id, voice_settings = self._voice_config(companion)
-        chat = await self._chat_service().send_message(
+        chat = await self._route_message(
             auth,
             ChatRequest(
                 conversation_id=conversation_id,
@@ -635,7 +656,7 @@ class VoiceService:
             provider_request_id=transcription.usage.request_id,
         )
 
-        chat = await self._chat_service().send_message(
+        chat = await self._route_message(
             auth,
             ChatRequest(
                 conversation_id=conversation_id,
@@ -662,13 +683,22 @@ class VoiceService:
             )
         )
 
+        # A spoken request can explicitly ask for a companion image. In that
+        # case the routed image is the response; do not synthesize its caption
+        # as an additional audio message.
+        if chat.message_type == MessageType.image.value:
+            await self.message_repo.session.commit()
+            return VoiceChatResponse(
+                **chat.model_dump(exclude={"transcript"}), transcript=transcript
+            )
+
         if not request_voice_response:
             await self.message_repo.session.commit()
             return VoiceChatResponse(
                 **chat.model_dump(exclude={"media", "transcript", "message_type"}),
-                message_type=MessageType.text.value,
+                message_type=chat.message_type,
                 transcript=transcript,
-                media=None,
+                media=chat.media,
             )
 
         return await self._synthesize_chat_response(

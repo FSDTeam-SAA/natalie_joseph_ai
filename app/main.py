@@ -32,7 +32,7 @@ app = FastAPI(
     description=(
         "AI backend service for the Meet Elysia companion platform. "
         "Owns conversation orchestration, companion personas, memory, "
-        "voice/image generation, story context, and safety moderation. Does not own "
+        "voice/image generation and story context. Does not own "
         "authentication UI, payments, or the frontend."
     ),
     version="0.1.0",

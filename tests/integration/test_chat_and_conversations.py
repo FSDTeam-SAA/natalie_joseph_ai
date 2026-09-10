@@ -4,7 +4,7 @@ chat endpoint (Phase 5 base + Phase 7 memory wiring).
 
 Provider calls are mocked at the provider boundary since integration
 tests must not call xAI or OpenAI. Everything else — auth, database writes, ownership
-checks, moderation branching, message persistence — runs for real
+checks and message persistence — runs for real
 against the real (schema-isolated) test database.
 
 Phase 7 note: test_send_message_happy_path now also mocks
@@ -37,15 +37,6 @@ from app.main import app
 _settings = get_settings()
 
 DEV_HEADERS = {"Authorization": f"Bearer {_settings.LOCAL_API_KEY}"}
-
-
-def _fake_moderation_response(flagged: bool = False):
-    fake_categories = SimpleNamespace(model_dump=lambda: {"sexual": flagged, "violence": False})
-    fake_scores = SimpleNamespace(model_dump=lambda: {"sexual": 0.9 if flagged else 0.001})
-    fake_result = SimpleNamespace(
-        flagged=flagged, categories=fake_categories, category_scores=fake_scores
-    )
-    return SimpleNamespace(results=[fake_result], model_dump=lambda: {})
 
 
 def _fake_generate_response(text: str):
@@ -184,18 +175,8 @@ class TestChatEndpoint:
         from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
         from app.llm.xai_provider import XAIProvider
-        from app.moderation.openai_moderation import OpenAIModerationProvider
 
         with (
-            patch.object(
-                OpenAIModerationProvider,
-                "moderate_text",
-                new=AsyncMock(
-                    return_value=SimpleNamespace(
-                        flagged=False, categories={}, category_scores={}
-                    )
-                ),
-            ),
             patch.object(
                 XAIProvider,
                 "generate",
@@ -268,46 +249,6 @@ class TestChatEndpoint:
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "Hey Elena, how was your day?"
         assert messages[1]["role"] == "assistant"
-
-    async def test_input_moderation_blocks_message(self, async_client: AsyncClient) -> None:
-        elena_id = await _get_elena_id(async_client)
-        headers = {**DEV_HEADERS, "X-Debug-User-Id": str(uuid.uuid4())}
-
-        conv_resp = await async_client.post(
-            "/api/v1/conversations", json={"companion_id": elena_id}, headers=headers
-        )
-        conversation_id = conv_resp.json()["id"]
-
-        from app.moderation.openai_moderation import OpenAIModerationProvider
-
-        with patch.object(
-            OpenAIModerationProvider,
-            "moderate_text",
-            new=AsyncMock(
-                return_value=SimpleNamespace(
-                    flagged=True, categories={"sexual_minors": True}, category_scores={}
-                )
-            ),
-        ):
-            chat_resp = await async_client.post(
-                "/api/v1/chat",
-                json={
-                    "conversation_id": conversation_id,
-                    "companion_id": elena_id,
-                    "message": "this should get blocked",
-                    "idempotency_key": str(uuid.uuid4()),
-                },
-                headers=headers,
-            )
-
-        assert chat_resp.status_code == 400
-        assert chat_resp.json()["error"]["code"] == "MODERATION_BLOCKED"
-
-        # Confirm nothing was persisted for a blocked input message.
-        messages_resp = await async_client.get(
-            f"/api/v1/conversations/{conversation_id}/messages", headers=headers
-        )
-        assert messages_resp.json() == []
 
     async def test_wrong_companion_for_conversation_rejected(
         self, async_client: AsyncClient

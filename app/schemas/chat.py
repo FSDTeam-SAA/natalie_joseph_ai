@@ -15,7 +15,7 @@ allow unrestricted / client-controlled access to another user's data).
 
 The response shape matches spec Section 21 exactly: message_id,
 conversation_id, companion_id, response, created_at, usage. No system
-prompts, moderation scores, chain-of-thought, or provider secrets.
+prompts, chain-of-thought, or provider secrets.
 """
 
 from __future__ import annotations

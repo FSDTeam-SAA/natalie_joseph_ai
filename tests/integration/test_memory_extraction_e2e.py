@@ -140,17 +140,9 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
         from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
         from app.llm.xai_provider import XAIProvider
-        from app.moderation.openai_moderation import OpenAIModerationProvider
 
         # --- Turn 1: mention the dog. Extraction should store a memory. ---
         with (
-            patch.object(
-                OpenAIModerationProvider,
-                "moderate_text",
-                new=AsyncMock(
-                    return_value=SimpleNamespace(flagged=False, categories={}, category_scores={})
-                ),
-            ),
             patch.object(
                 XAIProvider,
                 "generate",
@@ -225,13 +217,6 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
 
         with (
             patch.object(
-                OpenAIModerationProvider,
-                "moderate_text",
-                new=AsyncMock(
-                    return_value=SimpleNamespace(flagged=False, categories={}, category_scores={})
-                ),
-            ),
-            patch.object(
                 XAIProvider,
                 "generate",
                 new=AsyncMock(
@@ -283,19 +268,9 @@ class TestMemoryExtractionAndRetrievalEndToEnd:
         from app.embeddings.openai_embeddings import OpenAIEmbeddingProvider
         from app.llm.openai_provider import OpenAIProvider
         from app.llm.xai_provider import XAIProvider
-        from app.moderation.openai_moderation import OpenAIModerationProvider
 
         def _common_patches():
             return [
-                patch.object(
-                    OpenAIModerationProvider,
-                    "moderate_text",
-                    new=AsyncMock(
-                        return_value=SimpleNamespace(
-                            flagged=False, categories={}, category_scores={}
-                        )
-                    ),
-                ),
                 patch.object(
                     XAIProvider,
                     "generate",

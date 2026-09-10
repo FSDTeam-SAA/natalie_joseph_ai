@@ -6,22 +6,19 @@ import time
 import uuid
 
 from app.core.config import Settings
-from app.core.exceptions import ModerationBlockedError, ProviderError, ValidationError
+from app.core.exceptions import ProviderError, ValidationError
 from app.core.security import AuthContext, require_feature, require_trusted_backend
 from app.db.models.ai_event import AIEvent
 from app.db.models.message import Message, MessageRole, MessageType
-from app.db.models.safety_event import SafetyDirection, SafetyEvent
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.prompts.context import PromptContext
 from app.llm.prompts.serialization import serialize_untrusted
-from app.moderation.base import ModerationProvider
 from app.repositories.message_repository import MessageRepository
 from app.repositories.relationship_repository import RelationshipRepository
 from app.repositories.story_event_repository import StoryEventRepository
 from app.schemas.chat import ChatResponse, ChatUsage
 from app.services.backend_context_service import BackendConversationContext
-from app.services.chat_service import OUTPUT_MODERATION_FALLBACK, _moderation_blocks
 from app.services.memory_service import MemoryService
 
 
@@ -32,7 +29,6 @@ class ProactiveService:
         message_repo: MessageRepository,
         relationship_repo: RelationshipRepository,
         llm_provider: LLMProvider,
-        moderation_provider: ModerationProvider,
         prompt_builder: PromptBuilder,
         memory_service: MemoryService,
         settings: Settings,
@@ -41,32 +37,10 @@ class ProactiveService:
         self.message_repo = message_repo
         self.relationship_repo = relationship_repo
         self.llm_provider = llm_provider
-        self.moderation_provider = moderation_provider
         self.prompt_builder = prompt_builder
         self.memory_service = memory_service
         self.settings = settings
         self.story_repo = story_repo
-
-    async def _log_safety(
-        self,
-        *,
-        request_id: uuid.UUID,
-        context: BackendConversationContext,
-        direction: SafetyDirection,
-        categories: dict[str, bool],
-        action: str,
-    ) -> None:
-        flagged = [name for name, value in categories.items() if value]
-        self.message_repo.session.add(
-            SafetyEvent(
-                request_id=request_id,
-                user_id=context.user.id,
-                conversation_id=context.conversation.id,
-                direction=direction,
-                category=", ".join(flagged) if flagged else None,
-                action=action,
-            )
-        )
 
     async def generate(
         self,
@@ -113,28 +87,6 @@ class ProactiveService:
             )
             await self.message_repo.session.commit()
             return response
-
-        input_moderation = await self.moderation_provider.moderate_text(
-            reason, model=self.settings.OPENAI_MODERATION_MODEL
-        )
-        if _moderation_blocks(input_moderation, adult_eligible=auth.adult_eligible):
-            await self._log_safety(
-                request_id=idempotency_key,
-                context=context,
-                direction=SafetyDirection.input,
-                categories=input_moderation.categories,
-                action="blocked_proactive",
-            )
-            await self.message_repo.session.commit()
-            raise ModerationBlockedError("The proactive message context could not be processed.")
-        if input_moderation.flagged:
-            await self._log_safety(
-                request_id=idempotency_key,
-                context=context,
-                direction=SafetyDirection.input,
-                categories=input_moderation.categories,
-                action="allowed_adult_content",
-            )
 
         relationship = await self.relationship_repo.get_or_create(
             context.user.id, context.companion.id
@@ -190,22 +142,7 @@ class ProactiveService:
             reasoning_effort=self.settings.XAI_REASONING_EFFORT,
         )
         latency_ms = (time.perf_counter() - started) * 1000
-        output_moderation = await self.moderation_provider.moderate_text(
-            result.text, model=self.settings.OPENAI_MODERATION_MODEL
-        )
-        output_blocked = _moderation_blocks(
-            output_moderation,
-            adult_eligible=auth.adult_eligible,
-        )
-        final_text = OUTPUT_MODERATION_FALLBACK if output_blocked else result.text
-        if output_moderation.flagged:
-            await self._log_safety(
-                request_id=idempotency_key,
-                context=context,
-                direction=SafetyDirection.output,
-                categories=output_moderation.categories,
-                action="blocked_proactive" if output_blocked else "allowed_adult_content",
-            )
+        final_text = result.text
 
         trigger_message = Message(
             conversation_id=context.conversation.id,

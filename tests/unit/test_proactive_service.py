@@ -9,7 +9,6 @@ from app.core.config import Settings
 from app.core.security import AuthContext
 from app.db.models.message import MessageRole
 from app.llm.base import LLMResult, LLMUsage
-from app.moderation.base import ModerationResult
 from app.services.proactive_service import ProactiveService
 
 
@@ -62,14 +61,6 @@ async def test_proactive_message_uses_persona_history_memory_and_is_assistant_on
             get_or_create=AsyncMock(return_value=SimpleNamespace())
         ),
         llm_provider=llm,
-        moderation_provider=SimpleNamespace(
-            moderate_text=AsyncMock(
-                side_effect=[
-                    ModerationResult(False, {}, {}, {}),
-                    ModerationResult(False, {}, {}, {}),
-                ]
-            )
-        ),
         prompt_builder=SimpleNamespace(build_system_prompt=Mock(return_value="persona prompt")),
         memory_service=SimpleNamespace(
             retrieve_relevant=AsyncMock(return_value=["routine: morning walks"])

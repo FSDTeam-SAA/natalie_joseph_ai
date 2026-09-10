@@ -51,11 +51,6 @@ class NotFoundError(AppError):
     status_code = 404
 
 
-class ModerationBlockedError(AppError):
-    code = "MODERATION_BLOCKED"
-    status_code = 400
-
-
 class ProviderError(AppError):
     code = "PROVIDER_ERROR"
     status_code = 502
