@@ -188,6 +188,22 @@ class TestCompanionCommunicationStyleSection:
         )
         assert build_companion_communication_style(context) is None
 
+    def test_handles_structured_style_trait_from_catalogue(self) -> None:
+        companion = _make_companion(
+            communication_config={
+                "style_traits": [{"id": "warm", "name": "Warm and attentive"}],
+                "what_you_experience": [],
+            }
+        )
+        context = PromptContext(
+            companion=companion, auth=_make_auth(adult_eligible=False), user=_make_user()
+        )
+
+        text = build_companion_communication_style(context)
+
+        assert text is not None
+        assert "Warm and attentive" in text
+
 
 class TestUserProfileContextSection:
     def test_returns_none_with_no_locale_or_timezone(self) -> None:

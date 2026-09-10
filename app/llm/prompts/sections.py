@@ -21,6 +21,8 @@ conversation has no retrieved memories or a companion has no lifestyle data)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from app.llm.prompts.context import PromptContext
 from app.llm.prompts.serialization import serialize_untrusted
 
@@ -38,6 +40,29 @@ GLOBAL_BEHAVIOR_PROMPT = (
     "Stay fully in character as the persona described below for the "
     "entire conversation."
 )
+
+
+def _text_items(value: object) -> list[str]:
+    """Return usable display text from a catalogue field that may be structured."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, list):
+        value = [value]
+
+    items: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            items.append(item)
+        elif isinstance(item, Mapping):
+            # The companion catalogue has returned structured style values.
+            # Prefer a human-readable field rather than exposing a dict in
+            # the system prompt or failing the chat request.
+            for key in ("label", "name", "title", "value", "description", "text"):
+                candidate = item.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    items.append(candidate)
+                    break
+    return items
 
 
 def build_global_behavior(context: PromptContext) -> str | None:
@@ -141,10 +166,10 @@ def build_companion_identity(context: PromptContext) -> str | None:
 def build_companion_communication_style(context: PromptContext) -> str | None:
     communication = context.companion.communication_config or {}
     interests = context.companion.interest_config or {}
-    style_traits = ", ".join(communication.get("style_traits", []))
-    what_you_experience = communication.get("what_you_experience", [])
+    style_traits = ", ".join(_text_items(communication.get("style_traits", [])))
+    what_you_experience = _text_items(communication.get("what_you_experience", []))
     topics = communication.get("topics_she_enjoys", "")
-    interest_list = interests.get("interests", [])
+    interest_list = _text_items(interests.get("interests", []))
 
     if not style_traits and not what_you_experience:
         return None
