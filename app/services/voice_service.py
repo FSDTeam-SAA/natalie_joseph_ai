@@ -172,7 +172,12 @@ class VoiceService:
         if not self.settings.ENABLE_VOICE_GENERATION:
             raise ProviderError("Voice generation is disabled for this deployment.")
         voice_config = companion.voice_config or {}
-        voice_id = self.settings.COMPANION_VOICE_ID_MAP.get(companion.slug)
+        # The companion catalogue owns each companion's current voice. The
+        # environment map is retained only as a migration fallback for older
+        # catalogue records that do not yet provide a voice ID.
+        voice_id = voice_config.get("voice_id")
+        if not isinstance(voice_id, str) or not voice_id.strip():
+            voice_id = self.settings.COMPANION_VOICE_ID_MAP.get(companion.slug)
         voice_settings = voice_config.get("settings") or {}
         if not isinstance(voice_id, str) or not voice_id.strip():
             raise ProviderError("This companion has no ElevenLabs voice ID configured.")
@@ -192,9 +197,7 @@ class VoiceService:
         idempotency_key: uuid.UUID,
         transcript: str | None,
     ) -> VoiceChatResponse:
-        await self.message_repo.acquire_idempotency_lock(
-            scope="voice", request_id=idempotency_key
-        )
+        await self.message_repo.acquire_idempotency_lock(scope="voice", request_id=idempotency_key)
         assistant_message = await self.message_repo.get_by_id_for_conversation(
             message_id=chat.message_id, conversation_id=conversation.id
         )
@@ -254,9 +257,7 @@ class VoiceService:
         # The durable attempt commit releases the transaction-scoped lock. Take
         # it again before the paid call; followers will observe the attempt and
         # return without calling ElevenLabs.
-        await self.message_repo.acquire_idempotency_lock(
-            scope="voice", request_id=idempotency_key
-        )
+        await self.message_repo.acquire_idempotency_lock(scope="voice", request_id=idempotency_key)
 
         synthesis_started = time.perf_counter()
         try:

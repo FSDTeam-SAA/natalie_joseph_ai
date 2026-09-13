@@ -49,6 +49,26 @@ class CompanionService:
         return "-".join(str(profile["name"]).lower().split())
 
     @staticmethod
+    def _section(profile: dict, key: str) -> dict:
+        value = profile.get(key)
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _strings(value: object) -> list[str]:
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    @classmethod
+    def _communication(cls, profile: dict) -> tuple[list[str], list[str]]:
+        """Support both the live structured style and the legacy flat style."""
+        style = profile.get("communicationStyle")
+        if isinstance(style, dict):
+            return (
+                cls._strings(style.get("styleTraits")),
+                cls._strings(style.get("whatYouExperience")),
+            )
+        return ([style] if isinstance(style, str) else [], [])
+
+    @staticmethod
     def _reference_image_urls(profile: dict) -> list[str]:
         """Collect every usable remote image supplied by the companion profile."""
         raw_profile_image = profile.get("profileImage")
@@ -58,9 +78,7 @@ class CompanionService:
             else None
         )
         raw_gallery_images = profile.get("galleryImages", [])
-        gallery_images = (
-            raw_gallery_images if isinstance(raw_gallery_images, list) else []
-        )
+        gallery_images = raw_gallery_images if isinstance(raw_gallery_images, list) else []
 
         images: list[str] = []
         for image in ([profile_image] if profile_image else []) + gallery_images:
@@ -70,34 +88,45 @@ class CompanionService:
 
     @classmethod
     def _to_summary(cls, profile: dict) -> CompanionSummary:
+        personality = cls._section(profile, "personality")
+        background = cls._section(profile, "background")
         return CompanionSummary(
             id=profile["id"],
             slug=cls._slug(profile),
             name=profile["name"],
             title=profile.get("title"),
-            traits=profile.get("traits", []),
-            location=profile.get("location"),
-            occupation=profile.get("profession"),
+            traits=cls._strings(personality.get("traits", profile.get("traits"))),
+            location=background.get("location", profile.get("location")),
+            occupation=background.get("occupation", profile.get("profession")),
         )
 
     @classmethod
     def _to_detail(cls, profile: dict) -> CompanionDetail:
+        personality = cls._section(profile, "personality")
+        background = cls._section(profile, "background")
+        visual = cls._section(profile, "visualProfile")
+        voice = cls._section(profile, "voice")
+        style_traits, what_you_experience = cls._communication(profile)
         return CompanionDetail(
             id=profile["id"],
             slug=cls._slug(profile),
             name=profile["name"],
             title=profile.get("title"),
-            about=profile.get("bio"),
-            essence=profile.get("backstory"),
-            traits=profile.get("traits", []),
-            location=profile.get("location"),
-            occupation=profile.get("profession"),
-            lifestyle=[profile["lifestyle"]] if profile.get("lifestyle") else [],
-            communication_style_traits=(
-                [profile["communicationStyle"]] if profile.get("communicationStyle") else []
+            about=personality.get("about", profile.get("bio")),
+            essence=personality.get("essence", profile.get("backstory")),
+            traits=cls._strings(personality.get("traits", profile.get("traits"))),
+            location=background.get("location", profile.get("location")),
+            occupation=background.get("occupation", profile.get("profession")),
+            lifestyle=cls._strings(background.get("lifestyle", profile.get("lifestyle"))),
+            communication_style_traits=style_traits,
+            interests=cls._strings(profile.get("interests")),
+            aesthetic_keywords=cls._strings(
+                visual.get("aestheticKeywords", profile.get("aestheticKeywords"))
             ),
-            interests=profile.get("interests", []),
-            voice_available=bool(profile.get("voiceDescription")),
+            what_you_experience=what_you_experience,
+            voice_available=bool(
+                isinstance(voice.get("voiceId"), str) and voice["voiceId"].strip()
+            ),
             image_available=bool(profile.get("profileImage")),
         )
 
@@ -107,8 +136,14 @@ class CompanionService:
             name = str(profile["name"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError("The companion catalogue returned invalid data.") from exc
-        lifestyle = profile.get("lifestyle")
-        communication_style = profile.get("communicationStyle")
+        personality = self._section(profile, "personality")
+        background = self._section(profile, "background")
+        visual = self._section(profile, "visualProfile")
+        voice = self._section(profile, "voice")
+        style_traits, what_you_experience = self._communication(profile)
+        adult_interaction = self._section(profile, "adultInteraction")
+        if not adult_interaction:
+            adult_interaction = self._section(personality, "adultInteraction")
         slug = self._slug(profile)
         # The companion catalogue is the source of truth for character
         # identity. Its profile image is used first, followed by gallery images;
@@ -122,25 +157,36 @@ class CompanionService:
             version=1,
             personality_config={
                 "title": profile.get("title"),
-                "about": profile.get("bio"),
-                "essence": profile.get("backstory"),
-                "traits": profile.get("traits", []),
+                "about": personality.get("about", profile.get("bio")),
+                "essence": personality.get("essence", profile.get("backstory")),
+                "traits": self._strings(personality.get("traits", profile.get("traits"))),
             },
             communication_config={
-                "style_traits": [communication_style] if communication_style else [],
-                "what_you_experience": [],
+                "style_traits": style_traits,
+                "what_you_experience": what_you_experience,
+                "adult_interaction": adult_interaction,
             },
             background_config={
-                "location": profile.get("location"),
-                "lifestyle": [lifestyle] if lifestyle else [],
+                "location": background.get("location", profile.get("location")),
+                "lifestyle": self._strings(background.get("lifestyle", profile.get("lifestyle"))),
             },
-            interest_config={"interests": profile.get("interests", [])},
+            interest_config={"interests": self._strings(profile.get("interests"))},
             visual_config={
                 "reference_images": reference_images,
                 "reference_image": profile.get("profileImage"),
-                "aesthetic_keywords": [],
+                "aesthetic_keywords": self._strings(
+                    visual.get("aestheticKeywords", profile.get("aestheticKeywords"))
+                ),
+                "physical_identity": visual.get("physicalIdentity", ""),
+                "generation_instructions": visual.get("generationInstructions", ""),
             },
-            voice_config={"description": profile.get("voiceDescription", [])},
+            voice_config={
+                "voice_id": voice.get("voiceId"),
+                "settings": voice.get("settings")
+                if isinstance(voice.get("settings"), dict)
+                else {},
+                "description": self._strings(profile.get("voiceDescription")),
+            },
         )
 
     async def _get(self, path: str, params: dict[str, str | int | bool] | None = None) -> dict:
@@ -180,7 +226,13 @@ class CompanionService:
         profile = payload.get("data")
         if not isinstance(profile, dict):
             raise ProviderError("The companion catalogue returned invalid data.")
-        return self._to_detail(profile)
+        try:
+            return self._to_detail(profile)
+        except (KeyError, TypeError, ValueError) as exc:
+            # Catalogue data is external input.  Missing required fields or a
+            # schema mismatch must remain an upstream error rather than escape
+            # FastAPI's error boundary as a generic 500.
+            raise ProviderError("The companion catalogue returned invalid data.") from exc
 
     async def get_active_profile(self, companion_id: uuid.UUID) -> CompanionProfile:
         payload = await self._get(f"companions/{companion_id}")

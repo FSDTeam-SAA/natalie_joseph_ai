@@ -142,6 +142,9 @@ async def test_image_request_uses_reference_stores_and_returns_private_url(
     assert len(references) == 1
     assert references[0].filename == "lina-reference.png"
     deps.storage.put.assert_awaited_once()
+    provider_prompt = deps.image_provider.generate.await_args.kwargs["prompt"]
+    assert "The requesting user is a verified adult" in provider_prompt
+    assert "mature, romantic, sensual atmosphere" in provider_prompt
     assert response.media.url.endswith(str(response.media.id))
     assert "storage" not in response.media.url
     assert response.provider == "openai"

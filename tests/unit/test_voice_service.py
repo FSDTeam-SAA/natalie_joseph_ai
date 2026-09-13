@@ -50,9 +50,7 @@ def _service() -> tuple[VoiceService, SimpleNamespace]:
         active=True,
         voice_config={"voice_id": "voice-lina", "settings": {"stability": 0.5}},
     )
-    conversation = SimpleNamespace(
-        id=uuid.uuid4(), user_id=user.id, companion_id=companion.id
-    )
+    conversation = SimpleNamespace(id=uuid.uuid4(), user_id=user.id, companion_id=companion.id)
     assistant = SimpleNamespace(id=uuid.uuid4(), media_asset_id=None)
     chat = ChatResponse(
         message_id=assistant.id,
@@ -155,6 +153,16 @@ async def test_text_message_uses_chat_pipeline_and_generates_companion_audio() -
     assert response.media.mime_type == "audio/mpeg"
 
 
+def test_catalogue_voice_id_takes_precedence_over_environment_fallback() -> None:
+    service, deps = _service()
+    deps.companion.voice_config["voice_id"] = "catalogue-voice-id"
+
+    voice_id, voice_settings = service._voice_config(deps.companion)
+
+    assert voice_id == "catalogue-voice-id"
+    assert voice_settings == {"stability": 0.5}
+
+
 async def test_completed_voice_retry_reuses_media_without_second_tts() -> None:
     service, deps = _service()
     deps.assistant.media_asset_id = uuid.uuid4()
@@ -255,8 +263,7 @@ async def test_voice_upload_transcribes_then_uses_the_shared_chat_pipeline() -> 
     deps.voice_provider.transcribe.assert_awaited_once()
     deps.chat_service.send_message.assert_awaited_once()
     assert (
-        deps.chat_service.send_message.await_args.kwargs["user_message_type"]
-        == MessageType.audio
+        deps.chat_service.send_message.await_args.kwargs["user_message_type"] == MessageType.audio
     )
     assert response.transcript == "Hello from audio"
     assert response.media is None
@@ -361,9 +368,7 @@ async def test_invalid_transcript_is_terminal_and_never_reaches_chat(
 async def test_existing_stt_attempt_checks_fingerprint_and_never_repurchases() -> None:
     service, deps = _service()
     audio = _wav_audio()
-    previous = SimpleNamespace(
-        event_metadata={"status": "started", "input_sha256": "different"}
-    )
+    previous = SimpleNamespace(event_metadata={"status": "started", "input_sha256": "different"})
     deps.message_repo.get_ai_event_by_request_id.return_value = previous
 
     with pytest.raises(ValidationError, match="different audio upload"):

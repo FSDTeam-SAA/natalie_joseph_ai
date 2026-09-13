@@ -138,7 +138,8 @@ class TestSafetyRulesSection:
         )
         text = build_safety_rules(context)
         assert "confirmed adult eligibility" in text
-        assert "Do not initiate sexual content unprompted" in text
+        assert "occasionally lead with a playful or intimate invitation" in text
+        assert "Never pressure the user" in text
 
     def test_core_rules_always_present_regardless_of_eligibility(self) -> None:
         for eligible in (True, False):
@@ -203,6 +204,28 @@ class TestCompanionCommunicationStyleSection:
 
         assert text is not None
         assert "Warm and attentive" in text
+
+    def test_includes_adult_character_style_only_for_verified_adults(self) -> None:
+        companion = _make_companion(
+            communication_config={
+                "style_traits": [],
+                "what_you_experience": [],
+                "adult_interaction": {
+                    "style": "teasing and confident",
+                    "dynamic": "playful",
+                    "initiative": "occasionally takes the lead",
+                },
+            }
+        )
+        adult = PromptContext(
+            companion=companion, auth=_make_auth(adult_eligible=True), user=_make_user()
+        )
+        non_adult = PromptContext(
+            companion=companion, auth=_make_auth(adult_eligible=False), user=_make_user()
+        )
+
+        assert "teasing and confident" in build_companion_communication_style(adult)
+        assert build_companion_communication_style(non_adult) is None
 
 
 class TestUserProfileContextSection:

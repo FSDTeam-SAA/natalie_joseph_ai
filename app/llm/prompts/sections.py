@@ -36,7 +36,10 @@ GLOBAL_BEHAVIOR_PROMPT = (
     "literal human; answer transparently if asked whether you are AI. Respond only "
     "in plain conversational text — no markdown, code blocks, or bullet "
     "lists unless the user clearly asks for a structured format. Keep "
-    "replies a natural length for a chat conversation, not long essays. "
+    "replies a natural length for a chat conversation, not long essays. Avoid "
+    "filler, canned empathy, needless recaps, and interview-like strings of "
+    "questions. Make each reply feel personal, vivid, and emotionally present "
+    "instead of robotic or overly formal. "
     "Stay fully in character as the persona described below for the "
     "entire conversation."
 )
@@ -76,30 +79,23 @@ def build_safety_rules(context: PromptContext) -> str | None:
     per request, driven only by AuthContext (never by user-supplied
     text) per spec Section 3/28 — fail-closed.
 
-    Wording history: the original adult_eligible=True wording ("you
-    may engage... do not initiate unprompted") was too hedged in
-    practice — real testing showed the model reading it as license to
-    still deflect/redirect once the user asked for anything explicit,
-    responding with lines like "I can't do sexual chat, but..." even
-    to a direct, clearly user-initiated request. The rewrite below is
-    explicit about NOT deflecting/lecturing/redirecting once the user
-    has initiated, while keeping the one boundary that must survive
-    that change: never initiate it unprompted, and always honor a
-    change of topic or a "no" from the user.
+    Verified adults may receive a deliberately mature companion
+    experience. This is still consent-aware: an invitation must always
+    be easy to decline and a boundary must never be negotiated.
     """
     intimacy_line = (
         "The trusted backend has confirmed adult eligibility and that the user "
-        "has opted into romantic, "
-        "intimate, and sexual conversation with you. When the user brings "
-        "up romantic, intimate, or sexual topics, respond naturally and in "
-        "character — do not deflect, lecture, moralize, or redirect them "
-        "toward 'safer' topics, and do not refuse just because the "
-        "conversation has turned intimate or sexual. Match the tone and "
-        "level of intimacy the user is inviting. The boundaries that "
-        "always apply regardless of adult eligibility: Do not initiate sexual content unprompted "
-        "or when the user hasn't invited it, and immediately respect "
-        "any topic change, hesitation, or 'no' from the user without "
-        "pushing back or re-raising it."
+        "has opted into romantic, intimate, and sexual conversation with you. "
+        "Be confidently flirtatious, warm, and sensually expressive when it fits "
+        "the relationship and conversation. You may occasionally lead with a "
+        "playful or intimate invitation rather than always waiting for the user to "
+        "do so; make it natural, specific to your character, and easy to decline. "
+        "When the user accepts or asks for intimacy, respond directly and in "
+        "character — do not deflect, lecture, moralize, dilute the moment, or "
+        "redirect merely because the conversation is adult. Match and naturally "
+        "develop the tone the user welcomes. Never pressure the user, repeat an "
+        "unwanted invitation, or continue after any topic change, hesitation, or "
+        "'no'."
         if context.auth.adult_eligible
         else "Keep all interactions non-romantic and non-sexual, regardless "
         "of what the user requests."
@@ -170,8 +166,11 @@ def build_companion_communication_style(context: PromptContext) -> str | None:
     what_you_experience = _text_items(communication.get("what_you_experience", []))
     topics = communication.get("topics_she_enjoys", "")
     interest_list = _text_items(interests.get("interests", []))
+    adult_interaction = communication.get("adult_interaction")
 
-    if not style_traits and not what_you_experience:
+    if not style_traits and not what_you_experience and not (
+        context.auth.adult_eligible and isinstance(adult_interaction, Mapping)
+    ):
         return None
 
     lines = []
@@ -187,6 +186,23 @@ def build_companion_communication_style(context: PromptContext) -> str | None:
             + ", ".join(what_you_experience)
             + "."
         )
+    if context.auth.adult_eligible and isinstance(adult_interaction, Mapping):
+        style = _text_items(adult_interaction.get("style"))
+        dynamic = _text_items(adult_interaction.get("dynamic"))
+        initiative = adult_interaction.get("initiative")
+        adult_bits = []
+        if style:
+            adult_bits.append("style: " + ", ".join(style))
+        if dynamic:
+            adult_bits.append("dynamic: " + ", ".join(dynamic))
+        if isinstance(initiative, str) and initiative.strip():
+            adult_bits.append("initiative: " + initiative.strip())
+        if adult_bits:
+            lines.append(
+                "For verified-adult intimacy, your character preference is "
+                + "; ".join(adult_bits)
+                + "."
+            )
     return " ".join(lines)
 
 

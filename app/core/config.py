@@ -277,7 +277,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Prompt versioning (spec Section 34)
     # ------------------------------------------------------------------
-    PROMPT_VERSION: str = "elysia-v1"
+    PROMPT_VERSION: str = "elysia-v2"
 
     @field_validator("DATABASE_URL")
     @classmethod
