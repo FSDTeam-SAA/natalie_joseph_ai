@@ -27,20 +27,18 @@ voice_response_classifier = VoiceResponseClassifier()
     "/chat",
     response_model=ChatResponse,
     summary="Unified text, voice, and image chat",
-    description="Accepts JSON text or multipart form data with optional audio. Explicit photo "
+    description="Accepts multipart form data with optional audio. Explicit photo "
     "requests return images; voice input returns a spoken reply. Voice IDs stay private.",
     responses={
         422: {"description": "Invalid companion/conversation combination"},
         404: {"description": "Conversation not found"},
     },
-    # The handler intentionally parses either JSON or multipart from the raw
-    # request so old JSON clients remain compatible. Declare both shapes here
-    # because FastAPI cannot infer a request body from `Request` alone.
+    # The handler parses the raw multipart form so a text message and optional
+    # audio upload can use the same endpoint.
     openapi_extra={
         "requestBody": {
             "required": True,
             "content": {
-                "application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}},
                 "multipart/form-data": {
                     "schema": {
                         "type": "object",
@@ -73,29 +71,25 @@ async def send_chat_message(
     content_type = request.headers.get("content-type", "").lower()
     audio: UploadFile | None = None
     try:
-        if content_type.startswith("application/json"):
-            body = ChatRequest.model_validate(await request.json())
-        elif content_type.startswith("multipart/form-data"):
-            form = await request.form()
-            audio_value = form.get("audio")
-            # Swagger UI submits an empty optional binary form field as an
-            # empty string when “Send empty value” is selected. Treat that as
-            # an omitted upload so ordinary multipart text requests work.
-            if audio_value == "":
-                audio_value = None
-            if audio_value is not None and not isinstance(audio_value, UploadFile):
-                raise ValidationError("audio must be a file upload.")
-            audio = audio_value
-            body = ChatRequest.model_validate(
-                {
-                    "conversation_id": form.get("conversation_id"),
-                    "companion_id": form.get("companion_id"),
-                    "message": form.get("message") or "[voice message]",
-                    "idempotency_key": form.get("idempotency_key"),
-                }
-            )
-        else:
-            raise ValidationError("Use application/json or multipart/form-data.")
+        if not content_type.startswith("multipart/form-data"):
+            raise ValidationError("Use multipart/form-data.")
+        form = await request.form()
+        audio_value = form.get("audio")
+        # Swagger UI submits an empty optional binary form field as an empty
+        # string when “Send empty value” is selected. Treat it as omitted.
+        if audio_value == "":
+            audio_value = None
+        if audio_value is not None and not isinstance(audio_value, UploadFile):
+            raise ValidationError("audio must be a file upload.")
+        audio = audio_value
+        body = ChatRequest.model_validate(
+            {
+                "conversation_id": form.get("conversation_id"),
+                "companion_id": form.get("companion_id"),
+                "message": form.get("message") or "[voice message]",
+                "idempotency_key": form.get("idempotency_key"),
+            }
+        )
     except PydanticValidationError as exc:
         # These are caller-supplied identifiers and modes, so identifying the
         # invalid fields is safe and makes Swagger/API integrations actionable.
