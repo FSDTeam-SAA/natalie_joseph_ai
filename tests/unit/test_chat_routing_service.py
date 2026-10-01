@@ -55,6 +55,8 @@ def _message_repo(*, existing_user=None, existing_assistant=None):
         "Please generate a portrait of yourself in Paris.",
         "Show me yourself naked.",
         "Show me what you're wearing tonight.",
+        "Give me saree wearing look.",
+        "Send me a silk saree wearing look.",
         "Send me a picture from your evening.",
         "তোমার একটা ছবি পাঠাও।",
         "আমাকে একটা সেলফি দেখাও।",
@@ -76,6 +78,7 @@ def test_classifier_routes_explicit_natural_language_image_requests(message: str
         "How do I create an image?",
         "Show me how image generation works.",
         "I would like to discuss your photo.",
+        "I like the saree wearing look.",
         "Describe what you look like.",
         "ছবি নিয়ে কথা বলি।",
         "Send me a voice note.",
@@ -135,7 +138,7 @@ async def test_explicit_image_request_delegates_with_same_idempotency_key() -> N
         message_id=generated.message_id,
         conversation_id=generated.conversation_id,
         companion_id=generated.companion_id,
-        response=generated.caption,
+        response="",
         created_at=generated.created_at,
         usage=ChatUsage(input_tokens=0, output_tokens=0),
         message_type="image",
@@ -314,6 +317,7 @@ async def test_existing_image_request_replays_with_media_descriptor() -> None:
     )
 
     assert response.message_type == "image"
+    assert response.response == ""
     assert response.media == media
     assert response.message_id == replayed.message_id
     image_service.generate.assert_awaited_once()

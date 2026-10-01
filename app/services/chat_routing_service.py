@@ -74,6 +74,17 @@ class ImageRequestClassifier:
             r"\s+wearing|your\s+(?:outfit|look)|how\s+you\s+look)\b",
             re.IGNORECASE,
         ),
+        # A common concise form omits "photo" but clearly asks to see the
+        # companion in a particular outfit, e.g. "give me a saree wearing
+        # look". Require both a direct request and the visual "wearing look"
+        # phrase so ordinary discussion of fashion remains chat.
+        re.compile(
+            r"\b(?:give|show|send)\s+me\b[^.!?]{0,100}"
+            r"\bwearing\s+(?:a\s+|an\s+|the\s+)?[\w-]+\s+look\b"
+            r"|\b(?:give|show|send)\s+me\b[^.!?]{0,100}"
+            r"\b[\w-]+\s+wearing\s+look\b",
+            re.IGNORECASE,
+        ),
         re.compile(r"\bwhat\s+(?:do|would)\s+you\s+look\s+like\b", re.IGNORECASE),
         # Common Bangla/Banglish request forms put the action after the
         # image noun, unlike English. Keep this explicit and conservative.
@@ -165,7 +176,10 @@ class ChatRoutingService:
             message_id=image.message_id,
             conversation_id=image.conversation_id,
             companion_id=image.companion_id,
-            response=image.caption,
+            # Image clients render media.url directly. An empty response keeps
+            # the generated-image caption out of chat surfaces such as WhatsApp
+            # while retaining the complete media descriptor.
+            response="",
             created_at=image.created_at,
             usage=ChatUsage(input_tokens=0, output_tokens=0),
             message_type=MessageType.image.value,
