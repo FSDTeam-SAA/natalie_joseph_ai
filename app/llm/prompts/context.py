@@ -15,6 +15,7 @@ reuse the same builder without manufacturing data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from app.core.security import AuthContext
 from app.db.models.relationship_context import RelationshipContext
@@ -36,3 +37,4 @@ class PromptContext:
     retrieved_memories: list[str] = field(default_factory=list)
     conversation_summary: str | None = None
     story_events: list[str] = field(default_factory=list)
+    response_channel: Literal["text", "voice"] = "text"

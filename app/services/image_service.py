@@ -30,6 +30,8 @@ from app.schemas.media import (
 from app.services.companion_service import CompanionService
 from app.storage.base import MediaStorage, StoredObject
 
+_MAX_REFERENCE_IMAGES = 5
+
 
 def _image_mime(data: bytes, filename: str) -> str:
     suffix = Path(filename).suffix.lower()
@@ -137,6 +139,13 @@ class ImageService:
         )
 
     async def _load_reference_images(self, visual_config: dict) -> list[ReferenceImage]:
+        """Load the profile's configured reference images in listed order.
+
+        Both supported image providers accept up to five references. Keeping
+        that limit at this shared boundary ensures a one-image profile sends
+        its one image, while a multi-image profile sends the same ordered set
+        to either provider.
+        """
         configured = visual_config.get("reference_images")
         if configured is None:
             single = visual_config.get("reference_image")
@@ -152,7 +161,7 @@ class ImageService:
 
         root = Path(self.settings.COMPANION_ASSET_ROOT).resolve()
         references: list[ReferenceImage] = []
-        for reference_path in configured:
+        for reference_path in configured[:_MAX_REFERENCE_IMAGES]:
             if reference_path.startswith(("http://", "https://")):
                 references.append(await self._download_reference_image(reference_path))
                 continue
@@ -208,6 +217,25 @@ class ImageService:
         if not data:
             raise ValidationError("Companion reference image size is invalid.")
         return ReferenceImage(data=data, filename=filename, mime_type=_image_mime(data, filename))
+
+    async def _load_generation_context(
+        self, *, conversation_id: uuid.UUID, companion_id: uuid.UUID
+    ) -> tuple[list[Message], list[str]]:
+        """Load prompt inputs sequentially on the request session.
+
+        This remains sequential because both repository calls use the same
+        SQLAlchemy session. The method can safely run alongside reference-image
+        loading, which uses only file or network I/O.
+        """
+        recent = await self.message_repo.get_recent_for_conversation(
+            conversation_id, limit=min(self.settings.RECENT_MESSAGE_LIMIT, 6)
+        )
+        story_events = (
+            await self.story_repo.list_recent(companion_id)
+            if self.story_repo is not None
+            else []
+        )
+        return recent, [event.prompt_fact for event in story_events]
 
     @staticmethod
     def _build_prompt(
@@ -350,21 +378,21 @@ class ImageService:
                 )
             raise ProviderError("The previous image generation operation is incomplete.")
 
-        references = await self._load_reference_images(companion.visual_config or {})
-        recent = await self.message_repo.get_recent_for_conversation(
-            conversation.id, limit=min(self.settings.RECENT_MESSAGE_LIMIT, 6)
-        )
-        story_events = (
-            await self.story_repo.list_recent(companion.id)
-            if self.story_repo is not None
-            else []
+        # Reference-image I/O is independent of the database lookups below.
+        # Run them together to reduce setup latency without changing any prompt
+        # input, generation setting, or persistence behavior.
+        references, (recent, story_facts) = await asyncio.gather(
+            self._load_reference_images(companion.visual_config or {}),
+            self._load_generation_context(
+                conversation_id=conversation.id, companion_id=companion.id
+            ),
         )
         provider_prompt = self._build_prompt(
             companion_name=companion.name,
             visual_config=companion.visual_config or {},
             request_text=request.prompt,
             context=recent,
-            story_events=[event.prompt_fact for event in story_events],
+            story_events=story_facts,
             adult_eligible=auth.adult_eligible,
         )
         started = time.perf_counter()

@@ -27,6 +27,7 @@ from app.llm.prompts.sections import (
     build_conversation_summary,
     build_global_behavior,
     build_relationship_context,
+    build_response_pacing,
     build_retrieved_memories,
     build_safety_rules,
     build_story_context,
@@ -95,6 +96,45 @@ class TestGlobalBehaviorSection:
             companion=_make_companion(), auth=_make_auth(adult_eligible=False), user=_make_user()
         )
         assert build_global_behavior(context) is not None
+
+    def test_instructs_brief_natural_small_talk(self) -> None:
+        context = PromptContext(
+            companion=_make_companion(), auth=_make_auth(adult_eligible=False), user=_make_user()
+        )
+
+        text = build_global_behavior(context)
+
+        assert "greetings and casual small talk" in text
+        assert "match the user's brevity" in text
+        assert "one compact paragraph" in text
+        assert "one or two short sentences" in text
+        assert "at most one simple follow-up question" in text
+        assert "Do not use line breaks" in text
+
+
+class TestVoiceResponsePacingSection:
+    def test_is_omitted_for_text_responses(self) -> None:
+        context = PromptContext(
+            companion=_make_companion(), auth=_make_auth(adult_eligible=False), user=_make_user()
+        )
+
+        assert build_response_pacing(context) is None
+
+    def test_keeps_ordinary_voice_replies_short(self) -> None:
+        context = PromptContext(
+            companion=_make_companion(),
+            auth=_make_auth(adult_eligible=False),
+            user=_make_user(),
+            response_channel="voice",
+        )
+
+        text = build_response_pacing(context)
+
+        assert "one or two short sentences" in text
+        assert "15 to 35 words" in text
+        assert "longer answer only when" in text
+        assert "Never say you cannot send voice or audio" in text
+        assert "Do not discuss the response medium" in text
 
 
 class TestStoryContextSection:

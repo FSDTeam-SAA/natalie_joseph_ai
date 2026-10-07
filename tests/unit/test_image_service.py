@@ -150,6 +150,31 @@ async def test_image_request_uses_reference_stores_and_returns_private_url(
     assert response.provider == "openai"
 
 
+async def test_image_generation_context_preserves_recent_messages_and_story_facts(tmp_path) -> None:
+    service, deps = _service(tmp_path)
+    recent = [SimpleNamespace(role="user", content="A recent detail")]
+    deps.message_repo.get_recent_for_conversation.return_value = recent
+    service.story_repo = SimpleNamespace(
+        list_recent=AsyncMock(return_value=[SimpleNamespace(prompt_fact="A gallery opening")])
+    )
+
+    request = ImageGenerationRequest(
+        conversation_id=deps.conversation.id,
+        companion_id=deps.companion.id,
+        prompt="A Paris evening portrait",
+        idempotency_key=uuid.uuid4(),
+    )
+
+    await service.generate(_auth(), request)
+
+    provider_prompt = deps.image_provider.generate.await_args.kwargs["prompt"]
+    assert "A gallery opening" in provider_prompt
+    deps.message_repo.get_recent_for_conversation.assert_awaited_once_with(
+        deps.conversation.id, limit=6
+    )
+    service.story_repo.list_recent.assert_awaited_once_with(deps.companion.id)
+
+
 async def test_contextual_image_requires_trusted_backend(tmp_path) -> None:
     service, deps = _service(tmp_path)
     request = ImageGenerationRequest(
@@ -190,6 +215,19 @@ async def test_downloads_catalogue_reference_image_from_allowed_host(tmp_path) -
 
     assert references[0].filename == "luna.png"
     assert references[0].mime_type == "image/png"
+
+
+async def test_loads_one_or_multiple_profile_references_in_order_up_to_provider_limit(
+    tmp_path,
+) -> None:
+    service, _deps = _service(tmp_path)
+    filenames = [f"reference-{index}.png" for index in range(6)]
+    for filename in filenames:
+        (tmp_path / filename).write_bytes(b"\x89PNG\r\n\x1a\n" + filename.encode())
+
+    references = await service._load_reference_images({"reference_images": filenames})
+
+    assert [reference.filename for reference in references] == filenames[:5]
 
 
 async def test_invalid_provider_image_is_rejected_before_storage(tmp_path) -> None:

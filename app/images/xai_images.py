@@ -84,7 +84,7 @@ class XAIImageProvider(ImageProvider):
                     ),
                     "type": "image_url",
                 }
-                for image in reference_images[:5]
+            for image in reference_images
             ]
             if len(images) == 1:
                 body["image"] = images[0]

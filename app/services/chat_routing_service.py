@@ -9,6 +9,7 @@ through the existing :class:`ChatService` pipeline.
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from fastapi import BackgroundTasks
 
@@ -193,6 +194,7 @@ class ChatRoutingService:
         background_tasks: BackgroundTasks,
         *,
         user_message_type: MessageType = MessageType.text,
+        response_channel: Literal["text", "voice"] = "text",
     ) -> ChatResponse:
         # Without this check, routing an image before ChatService would let a
         # caller use the ordinary chat endpoint without a chat grant.
@@ -243,8 +245,12 @@ class ChatRoutingService:
             )
             return self._as_chat_response(image)
 
-        if user_message_type is MessageType.text:
+        if user_message_type is MessageType.text and response_channel == "text":
             return await self.chat_service.send_message(auth, request, background_tasks)
         return await self.chat_service.send_message(
-            auth, request, background_tasks, user_message_type=user_message_type
+            auth,
+            request,
+            background_tasks,
+            user_message_type=user_message_type,
+            response_channel=response_channel,
         )

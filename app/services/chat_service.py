@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import BackgroundTasks
 
@@ -67,6 +68,7 @@ class ChatService:
         background_tasks: BackgroundTasks,
         *,
         user_message_type: MessageType = MessageType.text,
+        response_channel: Literal["text", "voice"] = "text",
     ) -> ChatResponse:
         require_feature(auth, "chat")
         request_id = uuid.uuid4()
@@ -164,6 +166,7 @@ class ChatService:
             retrieved_memories=retrieved_memories,
             conversation_summary=conversation.summary,
             story_events=[event.prompt_fact for event in story_events],
+            response_channel=response_channel,
         )
         system_prompt = self.prompt_builder.build_system_prompt(prompt_context)
         recent_messages = await self.message_repo.get_recent_for_conversation(

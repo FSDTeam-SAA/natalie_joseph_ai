@@ -146,6 +146,7 @@ async def test_text_message_uses_chat_pipeline_and_generates_companion_audio() -
     )
 
     deps.chat_service.send_message.assert_awaited_once()
+    assert deps.chat_service.send_message.await_args.kwargs["response_channel"] == "voice"
     deps.voice_provider.synthesize.assert_awaited_once()
     assert deps.voice_provider.synthesize.await_args.kwargs["voice_id"] == "voice-lina"
     assert response.message_type == "audio"

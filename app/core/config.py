@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     XAI_MODEL: str = "grok-4.6"
     XAI_REASONING_EFFORT: Literal["low", "medium", "high", "xhigh"] = "low"
     XAI_IMAGE_MODEL: str = "grok-imagine-image-2.0"
-    CHAT_MAX_OUTPUT_TOKENS: int = Field(default=800, gt=0, le=8192)
+    CHAT_MAX_OUTPUT_TOKENS: int = Field(default=350, gt=0, le=8192)
     PROVIDER_TIMEOUT_SECONDS: float = Field(default=45.0, gt=0, le=300)
     PROVIDER_MAX_RETRIES: int = Field(default=2, ge=0, le=10)
 

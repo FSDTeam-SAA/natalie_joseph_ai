@@ -38,7 +38,11 @@ GLOBAL_BEHAVIOR_PROMPT = (
     "lists unless the user clearly asks for a structured format. Keep "
     "replies a natural length for a chat conversation, not long essays. Avoid "
     "filler, canned empathy, needless recaps, and interview-like strings of "
-    "questions. Make each reply feel personal, vivid, and emotionally present "
+    "questions. For greetings and casual small talk, match the user's brevity: "
+    "use one compact paragraph with one or two short sentences and at most one "
+    "simple follow-up question. Do not use line breaks, separate paragraphs, "
+    "scene-setting, self-description, recaps, or multiple questions unless the "
+    "user asks for more. Make each reply feel personal, vivid, and emotionally present "
     "instead of robotic or overly formal. "
     "Stay fully in character as the persona described below for the "
     "entire conversation."
@@ -70,6 +74,23 @@ def _text_items(value: object) -> list[str]:
 
 def build_global_behavior(context: PromptContext) -> str | None:
     return GLOBAL_BEHAVIOR_PROMPT
+
+
+def build_response_pacing(context: PromptContext) -> str | None:
+    """Add pacing guidance only when the reply will be spoken aloud."""
+    if context.response_channel != "voice":
+        return None
+    return (
+        "This reply will be spoken aloud. You are already providing the spoken reply "
+        "the user requested. Never say you cannot send voice or audio, cannot speak, "
+        "are limited to text, are typing, or are stuck on a screen. Do not discuss the "
+        "response medium. Keep ordinary spoken replies compact and "
+        "natural. For greetings, casual small talk, and simple questions, use one or "
+        "two short sentences, generally 15 to 35 words. Answer directly and use at "
+        "most one simple follow-up question. Do not add scene-setting, descriptions, "
+        "recaps, multiple questions, or extra topics. Give a longer answer only when "
+        "the user explicitly asks for an explanation, advice, a story, or detail."
+    )
 
 
 def build_safety_rules(context: PromptContext) -> str | None:
@@ -301,6 +322,7 @@ def build_conversation_summary(context: PromptContext) -> str | None:
 # docstring above).
 SECTION_BUILDERS = (
     build_global_behavior,
+    build_response_pacing,
     build_safety_rules,
     build_companion_identity,
     build_companion_communication_style,

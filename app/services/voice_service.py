@@ -4,6 +4,7 @@ import hashlib
 import logging
 import time
 import uuid
+from typing import Literal
 
 from app.core.config import Settings
 from app.core.exceptions import NotFoundError, ProviderError, ValidationError
@@ -111,13 +112,22 @@ class VoiceService:
         background_tasks,
         *,
         user_message_type: MessageType = MessageType.text,
+        response_channel: Literal["text", "voice"] = "text",
     ) -> ChatResponse:
         if self.chat_routing_service is not None:
             return await self.chat_routing_service.send_message(
-                auth, request, background_tasks, user_message_type=user_message_type
+                auth,
+                request,
+                background_tasks,
+                user_message_type=user_message_type,
+                response_channel=response_channel,
             )
         return await self._chat_service().send_message(
-            auth, request, background_tasks, user_message_type=user_message_type
+            auth,
+            request,
+            background_tasks,
+            user_message_type=user_message_type,
+            response_channel=response_channel,
         )
 
     async def _finish_attempt(self, attempt: AIEvent, status: str, **metadata: object) -> None:
@@ -482,6 +492,7 @@ class VoiceService:
                 idempotency_key=idempotency_key,
             ),
             background_tasks,
+            response_channel="voice",
         )
         return await self._synthesize_chat_response(
             chat=chat,
@@ -667,6 +678,7 @@ class VoiceService:
             ),
             background_tasks,
             user_message_type=MessageType.audio,
+            response_channel="voice" if request_voice_response else "text",
         )
         self.message_repo.session.add(
             AIEvent(

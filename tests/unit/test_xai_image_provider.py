@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.core.exceptions import ProviderError
-from app.images.base import ImageGenerationResult
+from app.images.base import ImageGenerationResult, ReferenceImage
 from app.images.failover import FailoverImageProvider
 from app.images.xai_images import XAIImageProvider
 
@@ -32,6 +32,56 @@ def test_xai_response_decoding_preserves_mime_type_and_usage() -> None:
     assert result.provider == "xai"
     assert result.mime_type == "image/jpeg"
     assert result.usage == {"cost_in_usd_ticks": 400000000}
+
+
+async def test_xai_provider_keeps_every_reference_it_receives() -> None:
+    provider = XAIImageProvider(
+        api_key="test-key",
+        base_url="https://xai.example/v1",
+        timeout_seconds=5,
+        max_retries=1,
+    )
+    references = [
+        ReferenceImage(data=b"image", filename=f"reference-{index}.png", mime_type="image/png")
+        for index in range(3)
+    ]
+
+    # The service owns the five-image limit; this adapter must not silently
+    # discard references that it receives.
+    captured_body: dict = {}
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "data": [
+                    {"b64_json": base64.b64encode(b"generated").decode("ascii")}
+                ]
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, _endpoint: str, *, json: dict) -> _Response:
+            captured_body.update(json)
+            return _Response()
+
+    with patch("app.images.xai_images.httpx.AsyncClient", return_value=_Client()):
+        await provider.generate(
+            prompt="portrait",
+            model="grok-imagine-image-2.0",
+            reference_images=references,
+            size="1024x1024",
+            quality="medium",
+        )
+
+    assert len(captured_body["images"]) == 3
 
 
 async def test_falls_back_to_openai_when_xai_generation_fails() -> None:
