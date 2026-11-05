@@ -16,6 +16,7 @@ import httpx
 from app.core.config import Settings
 from app.core.exceptions import NotFoundError, ProviderError
 from app.schemas.companion import CompanionDetail, CompanionSummary
+from app.services.routine_service import CompanionRoutine, parse_companion_routine
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class CompanionProfile:
     interest_config: dict
     visual_config: dict
     voice_config: dict
+    routine: CompanionRoutine | None = None
 
 
 class CompanionService:
@@ -149,25 +151,33 @@ class CompanionService:
         # identity. Its profile image is used first, followed by gallery images;
         # local deployment assets must not override these remote references.
         reference_images = self._reference_image_urls(profile)
+        version = profile.get("version", 1)
+        if type(version) is not int or version < 1:
+            version = 1
         return CompanionProfile(
             id=companion_id,
             slug=slug,
             name=name,
             active=bool(profile.get("status", False)),
-            version=1,
+            version=version,
             personality_config={
                 "title": profile.get("title"),
                 "about": personality.get("about", profile.get("bio")),
                 "essence": personality.get("essence", profile.get("backstory")),
                 "traits": self._strings(personality.get("traits", profile.get("traits"))),
+                "shared_traits": self._strings(personality.get("sharedTraits")),
             },
             communication_config={
                 "style_traits": style_traits,
+                "topics_she_enjoys": self._section(profile, "communicationStyle").get(
+                    "topicsSheEnjoys", ""
+                ),
                 "what_you_experience": what_you_experience,
                 "adult_interaction": adult_interaction,
             },
             background_config={
                 "location": background.get("location", profile.get("location")),
+                "occupation": background.get("occupation", profile.get("profession")),
                 "lifestyle": self._strings(background.get("lifestyle", profile.get("lifestyle"))),
             },
             interest_config={"interests": self._strings(profile.get("interests"))},
@@ -187,6 +197,7 @@ class CompanionService:
                 else {},
                 "description": self._strings(profile.get("voiceDescription")),
             },
+            routine=parse_companion_routine(profile.get("routine")),
         )
 
     async def _get(self, path: str, params: dict[str, str | int | bool] | None = None) -> dict:
@@ -256,8 +267,11 @@ class CompanionService:
             raise ProviderError("The companion catalogue returned invalid data.")
         for profile in profiles:
             if isinstance(profile, dict) and self._slug(profile) == reference.strip().lower():
-                companion = self._to_profile(profile)
-                if companion.active:
-                    return companion
-                break
+                # List responses may contain only profile-card fields. Always
+                # load the current detail, including its admin-edited routine.
+                try:
+                    companion_id = uuid.UUID(str(profile["id"]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ProviderError("The companion catalogue returned invalid data.") from exc
+                return await self.get_active_profile(companion_id)
         raise NotFoundError("Companion not found.")

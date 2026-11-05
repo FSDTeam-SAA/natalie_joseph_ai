@@ -42,6 +42,7 @@ from app.services.media_service import MediaService
 from app.services.memory_service import MemoryService
 from app.services.post_turn_processor import PostTurnProcessor
 from app.services.proactive_service import ProactiveService
+from app.services.routine_response_guard import RoutineResponseGuard
 from app.services.story_service import StoryService
 from app.services.user_data_service import UserDataService
 from app.services.voice_service import VoiceService
@@ -148,6 +149,13 @@ def get_prompt_builder(settings: Settings = Depends(get_settings)) -> PromptBuil
     return PromptBuilder.from_settings(settings)
 
 
+def get_routine_response_guard(
+    settings: Settings = Depends(get_settings),
+    reviewer: LLMProvider = Depends(get_background_llm_provider),
+) -> RoutineResponseGuard:
+    return RoutineResponseGuard(reviewer=reviewer, reviewer_model=settings.OPENAI_BACKGROUND_MODEL)
+
+
 def get_memory_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
@@ -202,6 +210,7 @@ def get_chat_service(
     prompt_builder: PromptBuilder = Depends(get_prompt_builder),
     memory_service: MemoryService = Depends(get_memory_service),
     post_turn_processor: PostTurnProcessor = Depends(get_post_turn_processor),
+    routine_guard: RoutineResponseGuard = Depends(get_routine_response_guard),
 ) -> ChatService:
     return ChatService(
         user_repo=UserRepository(db),
@@ -214,6 +223,7 @@ def get_chat_service(
         memory_service=memory_service,
         settings=settings,
         post_turn_processor=post_turn_processor,
+        routine_guard=routine_guard,
         story_repo=StoryEventRepository(db),
     )
 
@@ -444,6 +454,7 @@ def get_proactive_service(
     llm_provider: LLMProvider = Depends(get_chat_llm_provider),
     prompt_builder: PromptBuilder = Depends(get_prompt_builder),
     memory_service: MemoryService = Depends(get_memory_service),
+    routine_guard: RoutineResponseGuard = Depends(get_routine_response_guard),
 ) -> ProactiveService:
     return ProactiveService(
         message_repo=MessageRepository(db),
@@ -452,6 +463,7 @@ def get_proactive_service(
         prompt_builder=prompt_builder,
         memory_service=memory_service,
         settings=settings,
+        routine_guard=routine_guard,
         story_repo=StoryEventRepository(db),
     )
 

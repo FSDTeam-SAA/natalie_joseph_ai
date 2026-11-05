@@ -24,6 +24,8 @@ companion reference to this service.
   this service generates the contextual text or optional voice response.
 - Living-world continuity: the backend/social pipeline upserts global companion
   story events, which are reused by chat, proactive responses, and images.
+- Companion routines: each backend profile's optional weekly routine supplies
+  the current companion-local activity to text, voice, proactive replies, and images.
 
 Text, audio, and image assistant messages share one conversation/message model.
 Long-term memories use pgvector, rolling summaries and deterministic
@@ -187,3 +189,68 @@ mocked in integration tests.
 
 The API contract supports a separate frontend, but recording/playback/rendering
 UI must be implemented in the frontend repository owned by that team.
+
+## Backend-owned companion routines
+
+The catalogue detail response may include `data.routine` for any companion:
+
+```json
+{
+  "timezone": "Asia/Dubai",
+  "weekly": [
+    {"day": 1, "start": "12:00", "end": "18:00", "activity": "Work at a café"},
+    {"day": 1, "start": "23:00", "end": "06:00", "activity": "Sleep"}
+  ]
+}
+```
+
+Days follow ISO numbering (Monday = 1, Sunday = 7). Times are local `HH:MM`,
+with inclusive starts and exclusive ends. An end earlier than its start crosses
+midnight: Monday 23:00–06:00 ends Tuesday morning. Sunday overnight slots also
+carry into Monday. Each companion uses its own IANA timezone, including daylight
+saving transitions; user and server timezones do not choose the activity.
+
+The AI service resolves one activity per new generation. It does not calculate
+sub-schedules for combined labels such as "Coffee at home, gym". Current routine
+context takes precedence over older whereabouts in conversation/story context.
+Current selfies use that activity as their default scene; explicit imagined or
+past scene requests may differ. A sleep slot still allows a conversational reply.
+
+Missing/null routines, empty schedules, gaps, or invalid schedules contribute no
+routine prompt section, preserving the existing response flow. Invalid timezones,
+blank activities, equal start/end times, and overlapping slots (including across
+midnight/week boundaries) cause the optional routine to be ignored and emit a
+content-free warning. Admin input should be validated by the main backend too.
+
+Profiles are fetched from the backend without a local profile cache; slug lookups
+fetch the full detail after finding the companion ID. Admin edits apply to the
+next new generation once the catalogue returns the update. Completed idempotent
+retries replay their original output. No routine database migration, per-companion
+code, new endpoint, or timer is required; automatic messages/photos remain owned
+by the main backend's existing scheduling and authorization flows.
+
+Current routine replies also pass a semantic consistency check using the configured
+background model. The latest resolved scene is repeated after conversation history
+so older locations and times do not set the current scene. Ordinary activity
+questions receive an in-character answer; direct questions about AI identity still
+receive a truthful disclosure. The companion uses its own local daypart and the
+user's language.
+
+An inconsistent draft is regenerated once in the original persona and checked
+again. If the checker is unavailable, returns malformed data, or the second draft
+still conflicts, the API returns a provider error rather than persisting or speaking
+an unverified draft. Active routine turns therefore incur one additional background
+model call normally, or two checks plus a second generation when repaired. Missing
+or unmatched routines use the previous generation path without these extra calls.
+
+The `chat_completion` and `proactive_message` AI event metadata records
+`routine_context` (the exact local time, daypart, activity and slot) and
+`routine_validation` (verdicts, checker usage, policy version and whether a repair
+was needed). Main generation token counts include both drafts when repaired;
+checker tokens are recorded separately in the metadata. Standard logs include
+slot/time identifiers and rejection reason codes, without raw conversation text.
+
+Image prompts use the same resolved snapshot after user scene/style context so
+present-moment selfies follow the activity and local time rather than stale
+evening aesthetics. Image asset/event metadata also records `routine_context`.
+This does not add an automatic visual verifier for generated pixels.

@@ -1,11 +1,11 @@
-﻿"""
+"""
 PromptContext — the single data bundle threaded through PromptBuilder.
 
 Per spec Section 34, the modular prompt system assembles context from
 several sources in a fixed order. This dataclass exists so that order
 is enforced in one place (PromptBuilder + sections.py) rather than
 scattered across call sites. Long-term memory retrieval, rolling
-conversation summaries, and companion story events all populate this
+conversation summaries, current routine activities, and story events populate this
 same bundle without changing PromptBuilder's public shape.
 
 Optional context fields default to None / empty so specialized flows can
@@ -21,6 +21,7 @@ from app.core.security import AuthContext
 from app.db.models.relationship_context import RelationshipContext
 from app.db.models.user import User
 from app.services.companion_service import CompanionProfile
+from app.services.routine_service import RoutineActivity
 
 
 @dataclass(frozen=True)
@@ -38,3 +39,4 @@ class PromptContext:
     conversation_summary: str | None = None
     story_events: list[str] = field(default_factory=list)
     response_channel: Literal["text", "voice"] = "text"
+    routine_activity: RoutineActivity | None = None

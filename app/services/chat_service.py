@@ -22,6 +22,7 @@ from app.db.models.message import Message, MessageRole, MessageType
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.prompts.context import PromptContext
+from app.llm.prompts.sections import build_routine_context
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.repositories.relationship_repository import RelationshipRepository
@@ -31,6 +32,8 @@ from app.schemas.chat import ChatRequest, ChatResponse, ChatUsage
 from app.services.companion_service import CompanionService
 from app.services.memory_service import MemoryService
 from app.services.post_turn_processor import PostTurnProcessor
+from app.services.routine_response_guard import RoutineResponseGuard
+from app.services.routine_service import resolve_current_activity
 
 
 class ChatService:
@@ -48,6 +51,7 @@ class ChatService:
         settings: Settings,
         post_turn_processor: PostTurnProcessor | None = None,
         story_repo: StoryEventRepository | None = None,
+        routine_guard: RoutineResponseGuard | None = None,
     ) -> None:
         self.user_repo = user_repo
         self.companion_service = companion_service
@@ -60,6 +64,9 @@ class ChatService:
         self.settings = settings
         self.post_turn_processor = post_turn_processor
         self.story_repo = story_repo
+        self.routine_guard = routine_guard or RoutineResponseGuard(
+            reviewer=llm_provider, reviewer_model=settings.XAI_MODEL
+        )
 
     async def send_message(
         self,
@@ -137,9 +144,7 @@ class ChatService:
         # Fetch-or-create is idempotent; the row is flushed into this
         # same session/transaction and committed with everything else
         # below, so it runs only on the path that will generate a reply.
-        relationship_context = await self.relationship_repo.get_or_create(
-            user.id, companion.id
-        )
+        relationship_context = await self.relationship_repo.get_or_create(user.id, companion.id)
 
         # --- Long-term memory retrieval (Phase 7) ---
         # Synchronous and on the critical path deliberately — unlike
@@ -152,9 +157,7 @@ class ChatService:
             user_id=user.id, companion_id=companion.id, query_text=request.message
         )
         story_events = (
-            await self.story_repo.list_recent(companion.id)
-            if self.story_repo is not None
-            else []
+            await self.story_repo.list_recent(companion.id) if self.story_repo is not None else []
         )
 
         # --- Build system prompt (PromptBuilder, Phase 6) + recent history ---
@@ -167,6 +170,7 @@ class ChatService:
             conversation_summary=conversation.summary,
             story_events=[event.prompt_fact for event in story_events],
             response_channel=response_channel,
+            routine_activity=resolve_current_activity(getattr(companion, "routine", None)),
         )
         system_prompt = self.prompt_builder.build_system_prompt(prompt_context)
         recent_messages = await self.message_repo.get_recent_for_conversation(
@@ -178,17 +182,23 @@ class ChatService:
             if m.role == MessageRole.system:
                 continue
             llm_messages.append(LLMMessage(role=m.role.value, content=m.content))
+        if routine_directive := build_routine_context(prompt_context):
+            llm_messages.append(LLMMessage(role="developer", content=routine_directive))
         llm_messages.append(LLMMessage(role="user", content=request.message))
 
         # --- Generate ---
         start = time.perf_counter()
-        result = await self.llm_provider.generate(
+        generation = await self.routine_guard.generate(
+            self.llm_provider,
             llm_messages,
+            context=prompt_context,
+            user_message=request.message,
             model=self.settings.XAI_MODEL,
             max_output_tokens=self.settings.CHAT_MAX_OUTPUT_TOKENS,
             cache_key=f"conversation:{conversation.id}",
             reasoning_effort=self.settings.XAI_REASONING_EFFORT,
         )
+        result = generation.result
         latency_ms = (time.perf_counter() - start) * 1000
 
         final_text = result.text
@@ -229,7 +239,7 @@ class ChatService:
             latency_ms=latency_ms,
             input_tokens=result.usage.input_tokens,
             output_tokens=result.usage.output_tokens,
-            event_metadata=result.usage.as_metadata(),
+            event_metadata={**result.usage.as_metadata(), **generation.metadata},
         )
         self.message_repo.session.add(ai_event)
 

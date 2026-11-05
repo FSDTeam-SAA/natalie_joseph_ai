@@ -13,6 +13,7 @@ from app.db.models.message import Message, MessageRole, MessageType
 from app.llm.base import LLMMessage, LLMProvider
 from app.llm.prompts.builder import PromptBuilder
 from app.llm.prompts.context import PromptContext
+from app.llm.prompts.sections import build_routine_context
 from app.llm.prompts.serialization import serialize_untrusted
 from app.repositories.message_repository import MessageRepository
 from app.repositories.relationship_repository import RelationshipRepository
@@ -20,6 +21,8 @@ from app.repositories.story_event_repository import StoryEventRepository
 from app.schemas.chat import ChatResponse, ChatUsage
 from app.services.backend_context_service import BackendConversationContext
 from app.services.memory_service import MemoryService
+from app.services.routine_response_guard import RoutineResponseGuard
+from app.services.routine_service import resolve_current_activity
 
 
 class ProactiveService:
@@ -33,6 +36,7 @@ class ProactiveService:
         memory_service: MemoryService,
         settings: Settings,
         story_repo: StoryEventRepository | None = None,
+        routine_guard: RoutineResponseGuard | None = None,
     ) -> None:
         self.message_repo = message_repo
         self.relationship_repo = relationship_repo
@@ -41,6 +45,9 @@ class ProactiveService:
         self.memory_service = memory_service
         self.settings = settings
         self.story_repo = story_repo
+        self.routine_guard = routine_guard or RoutineResponseGuard(
+            reviewer=llm_provider, reviewer_model=settings.XAI_MODEL
+        )
 
     async def generate(
         self,
@@ -64,9 +71,7 @@ class ProactiveService:
         )
         if existing_trigger is not None:
             if existing_trigger.role != MessageRole.system or existing_trigger.content != reason:
-                raise ValidationError(
-                    "The idempotency key was already used for another operation."
-                )
+                raise ValidationError("The idempotency key was already used for another operation.")
             existing_reply = await self.message_repo.get_first_assistant_after(
                 conversation_id=context.conversation.id,
                 sequence=existing_trigger.sequence,
@@ -101,17 +106,17 @@ class ProactiveService:
             if self.story_repo is not None
             else []
         )
-        system_prompt = self.prompt_builder.build_system_prompt(
-            PromptContext(
-                companion=context.companion,
-                auth=auth,
-                user=context.user,
-                relationship_context=relationship,
-                retrieved_memories=memories,
-                conversation_summary=context.conversation.summary,
-                story_events=[event.prompt_fact for event in story_events],
-            )
+        prompt_context = PromptContext(
+            companion=context.companion,
+            auth=auth,
+            user=context.user,
+            relationship_context=relationship,
+            retrieved_memories=memories,
+            conversation_summary=context.conversation.summary,
+            story_events=[event.prompt_fact for event in story_events],
+            routine_activity=resolve_current_activity(getattr(context.companion, "routine", None)),
         )
+        system_prompt = self.prompt_builder.build_system_prompt(prompt_context)
         recent = await self.message_repo.get_recent_for_conversation(
             context.conversation.id, limit=self.settings.RECENT_MESSAGE_LIMIT
         )
@@ -121,6 +126,8 @@ class ProactiveService:
             for message in recent
             if message.role != MessageRole.system
         )
+        if routine_directive := build_routine_context(prompt_context):
+            messages.append(LLMMessage(role="developer", content=routine_directive))
         messages.append(
             LLMMessage(
                 role="developer",
@@ -134,13 +141,18 @@ class ProactiveService:
         )
 
         started = time.perf_counter()
-        result = await self.llm_provider.generate(
+        generation = await self.routine_guard.generate(
+            self.llm_provider,
             messages,
+            context=prompt_context,
+            user_message=reason,
+            purpose="proactive",
             model=self.settings.XAI_MODEL,
             max_output_tokens=self.settings.CHAT_MAX_OUTPUT_TOKENS,
             cache_key=f"conversation:{context.conversation.id}",
             reasoning_effort=self.settings.XAI_REASONING_EFFORT,
         )
+        result = generation.result
         latency_ms = (time.perf_counter() - started) * 1000
         final_text = result.text
 
@@ -177,7 +189,7 @@ class ProactiveService:
                 latency_ms=latency_ms,
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
-                event_metadata=result.usage.as_metadata(),
+                event_metadata={**result.usage.as_metadata(), **generation.metadata},
             )
         )
         await self.message_repo.session.commit()
