@@ -20,6 +20,9 @@ def test_health_liveness() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert response.headers["X-Request-ID"]
+    assert response.headers["Server-Timing"].startswith("app;dur=")
+    assert float(response.headers["Server-Timing"].split("=", 1)[1]) >= 0
 
 
 def test_framework_404_uses_the_consistent_error_envelope() -> None:

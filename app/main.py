@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import utils.session
 import logging
+import time
 import uuid
 from http import HTTPStatus
 
@@ -43,10 +45,23 @@ app = FastAPI(
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
+    started = time.perf_counter()
     request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
     request.state.request_id = request_id
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms}"
+    logger.info(
+        "request_completed",
+        extra={
+            "request_id": request_id,
+            "endpoint": getattr(request.scope.get("route"), "path", request.url.path),
+            "method": request.method,
+            "status_code": response.status_code,
+            "response_ready_ms": elapsed_ms,
+        },
+    )
     return response
 
 

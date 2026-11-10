@@ -1,6 +1,7 @@
 .git
 .env
 .venv
+.python-runtime
 venv
 __pycache__
 *.py[cod]
