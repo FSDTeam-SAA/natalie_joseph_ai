@@ -163,29 +163,37 @@ class ImageService:
                 "This companion has no reference image configured; image generation is unavailable."
             )
 
-        root = Path(self.settings.COMPANION_ASSET_ROOT).resolve()
+        # Independent file/HTTP reads can overlap; gather preserves identity-reference order.
+        # Wait for all reads before raising so failed requests leave no orphan downloads.
+        results = await asyncio.gather(
+            *(self._load_reference_image(path) for path in configured[:_MAX_REFERENCE_IMAGES]),
+            return_exceptions=True,
+        )
         references: list[ReferenceImage] = []
-        for reference_path in configured[:_MAX_REFERENCE_IMAGES]:
-            if reference_path.startswith(("http://", "https://")):
-                references.append(await self._download_reference_image(reference_path))
-                continue
-            relative_path = reference_path
-            candidate = (root / relative_path).resolve()
-            if not candidate.is_relative_to(root):
-                raise ValidationError("Companion reference image path is invalid.")
-            try:
-                data = await asyncio.to_thread(candidate.read_bytes)
-            except FileNotFoundError as exc:
-                raise ProviderError("A configured companion reference image is missing.") from exc
-            except OSError as exc:
-                raise ProviderError("A companion reference image could not be read.") from exc
-            if not data or len(data) > self.settings.MAX_REFERENCE_IMAGE_BYTES:
-                raise ValidationError("Companion reference image size is invalid.")
-            mime_type = _image_mime(data, candidate.name)
-            references.append(
-                ReferenceImage(data=data, filename=candidate.name, mime_type=mime_type)
-            )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            references.append(result)
         return references
+
+    async def _load_reference_image(self, reference_path: str) -> ReferenceImage:
+        if reference_path.startswith(("http://", "https://")):
+            return await self._download_reference_image(reference_path)
+        root = Path(self.settings.COMPANION_ASSET_ROOT).resolve()
+        candidate = (root / reference_path).resolve()
+        if not candidate.is_relative_to(root):
+            raise ValidationError("Companion reference image path is invalid.")
+        try:
+            data = await asyncio.to_thread(candidate.read_bytes)
+        except FileNotFoundError as exc:
+            raise ProviderError("A configured companion reference image is missing.") from exc
+        except OSError as exc:
+            raise ProviderError("A companion reference image could not be read.") from exc
+        if not data or len(data) > self.settings.MAX_REFERENCE_IMAGE_BYTES:
+            raise ValidationError("Companion reference image size is invalid.")
+        return ReferenceImage(
+            data=data, filename=candidate.name, mime_type=_image_mime(data, candidate.name)
+        )
 
     async def _download_reference_image(self, url: str) -> ReferenceImage:
         """Download a catalogue image only from an explicitly trusted HTTPS host."""
@@ -401,12 +409,17 @@ class ImageService:
         # Reference-image I/O is independent of the database lookups below.
         # Run them together to reduce setup latency without changing any prompt
         # input, generation setting, or persistence behavior.
-        references, (recent, story_facts) = await asyncio.gather(
-            self._load_reference_images(companion.visual_config or {}),
-            self._load_generation_context(
-                conversation_id=conversation.id, companion_id=companion.id
-            ),
-        )
+        if auth.raw_claims.get("library_reuse") is True:
+            # Do not even load private history for a reusable generic scene.
+            references = await self._load_reference_images(companion.visual_config or {})
+            recent, story_facts = [], []
+        else:
+            references, (recent, story_facts) = await asyncio.gather(
+                self._load_reference_images(companion.visual_config or {}),
+                self._load_generation_context(
+                    conversation_id=conversation.id, companion_id=companion.id
+                ),
+            )
         routine_activity = resolve_current_activity(getattr(companion, "routine", None))
         routine_metadata = (
             {"routine_context": routine_activity.as_prompt_data()} if routine_activity else {}

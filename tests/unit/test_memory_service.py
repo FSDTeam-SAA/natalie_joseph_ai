@@ -8,6 +8,7 @@ tests/integration/test_memory_extraction_e2e.py.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -30,6 +31,7 @@ def _fake_settings(**overrides) -> SimpleNamespace:
         MEMORY_TOP_K=5,
         MEMORY_MIN_SCORE=0.75,
         MEMORY_MIN_CONFIDENCE=0.6,
+        MEMORY_EMBEDDING_TIMEOUT_SECONDS=1.0,
         PROMPT_VERSION="test-v1",
     )
     defaults.update(overrides)
@@ -233,8 +235,12 @@ class TestExtractAndStore:
             vector=[0.2] * 3, model="text-embedding-3-small", dimensions=3
         )
         existing = SimpleNamespace(
-            key="pet_name", value="old value", memory_type=MemoryType.fact,
-            confidence=0.5, embedding=[0.0] * 3, active=False,
+            key="pet_name",
+            value="old value",
+            memory_type=MemoryType.fact,
+            confidence=0.5,
+            embedding=[0.0] * 3,
+            active=False,
         )
         mocks["memory_repo"].find_existing_by_key.return_value = existing
 
@@ -337,3 +343,27 @@ class TestExtractAndStore:
 
         mocks["memory_repo"].add.assert_not_awaited()
         mocks["memory_repo"].find_existing_by_key.assert_not_awaited()
+
+
+async def test_slow_embedding_is_cancelled_and_profile_facts_are_retained():
+    service, mocks = _make_service()
+    service.settings.MEMORY_EMBEDDING_TIMEOUT_SECONDS = 0.01
+    mocks["memory_repo"].list_active_by_keys.return_value = [
+        _fake_memory(key="name", value="Sam", embedding=[1.0])
+    ]
+    cancelled = asyncio.Event()
+
+    async def slow_embedding(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    mocks["embedding_provider"].embed_text.side_effect = slow_embedding
+    result = await asyncio.wait_for(
+        service.retrieve_relevant(user_id=uuid.uuid4(), companion_id=uuid.uuid4(), query_text="Hi"),
+        timeout=1,
+    )
+    assert result == ["name: Sam"]
+    assert cancelled.is_set()
+    mocks["memory_repo"].search_similar.assert_not_awaited()

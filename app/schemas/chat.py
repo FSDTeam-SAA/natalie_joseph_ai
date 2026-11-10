@@ -50,3 +50,5 @@ class ChatResponse(BaseModel):
     message_type: str = "text"
     media: MediaDescriptor | None = None
     transcript: str | None = None
+    context_version: str | None = None
+    billing: dict[str, float | int] | None = None

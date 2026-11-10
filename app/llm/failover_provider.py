@@ -97,12 +97,18 @@ class FailoverLLMProvider(LLMProvider):
         schema_name: str,
         json_schema: dict,
         temperature: float | None = None,
+        max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMStructuredResult:
         kwargs = {
             "schema_name": schema_name,
             "json_schema": json_schema,
             "temperature": temperature,
         }
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
         if self.primary is not None:
             try:
                 return await self.primary.generate_structured(messages, model=model, **kwargs)

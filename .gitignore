@@ -18,6 +18,7 @@ dist/
 *.egg-info/
 .eggs/
 .venv/
+.python-runtime/
 venv/
 env/
 .pytest_cache/

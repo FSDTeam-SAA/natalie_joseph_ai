@@ -9,6 +9,7 @@ from functools import lru_cache
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.companions import get_companion_service
 from app.core.config import MediaStorageBackend, Settings, get_settings
 from app.core.exceptions import ServiceUnavailableError
 from app.core.rate_limit import RateLimiter
@@ -153,7 +154,11 @@ def get_routine_response_guard(
     settings: Settings = Depends(get_settings),
     reviewer: LLMProvider = Depends(get_background_llm_provider),
 ) -> RoutineResponseGuard:
-    return RoutineResponseGuard(reviewer=reviewer, reviewer_model=settings.OPENAI_BACKGROUND_MODEL)
+    return RoutineResponseGuard(
+        reviewer=reviewer,
+        reviewer_model=settings.OPENAI_BACKGROUND_MODEL,
+        review_max_output_tokens=settings.ROUTINE_REVIEW_MAX_OUTPUT_TOKENS,
+    )
 
 
 def get_memory_service(
@@ -173,10 +178,11 @@ def get_memory_service(
 def get_conversation_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
+    companion_service: CompanionService = Depends(get_companion_service),
 ) -> ConversationService:
     return ConversationService(
         user_repo=UserRepository(db),
-        companion_service=CompanionService(settings),
+        companion_service=companion_service,
         conversation_repo=ConversationRepository(db),
         message_repo=MessageRepository(db),
         settings=settings,
@@ -211,10 +217,11 @@ def get_chat_service(
     memory_service: MemoryService = Depends(get_memory_service),
     post_turn_processor: PostTurnProcessor = Depends(get_post_turn_processor),
     routine_guard: RoutineResponseGuard = Depends(get_routine_response_guard),
+    companion_service: CompanionService = Depends(get_companion_service),
 ) -> ChatService:
     return ChatService(
         user_repo=UserRepository(db),
-        companion_service=CompanionService(settings),
+        companion_service=companion_service,
         conversation_repo=ConversationRepository(db),
         message_repo=MessageRepository(db),
         relationship_repo=RelationshipRepository(db),
@@ -312,10 +319,11 @@ def get_image_service(
     settings: Settings = Depends(get_settings),
     image_provider: ImageProvider = Depends(get_image_provider),
     storage: MediaStorage = Depends(get_media_storage),
+    companion_service: CompanionService = Depends(get_companion_service),
 ) -> ImageService:
     return ImageService(
         user_repo=UserRepository(db),
-        companion_service=CompanionService(settings),
+        companion_service=companion_service,
         conversation_repo=ConversationRepository(db),
         message_repo=MessageRepository(db),
         media_repo=MediaRepository(db),
@@ -380,10 +388,11 @@ def get_voice_service(
     chat_routing_service: ChatRoutingService = Depends(get_chat_routing_service),
     voice_provider: VoiceProvider = Depends(get_voice_provider),
     storage: MediaStorage = Depends(get_media_storage),
+    companion_service: CompanionService = Depends(get_companion_service),
 ) -> VoiceService:
     return VoiceService(
         user_repo=UserRepository(db),
-        companion_service=CompanionService(settings),
+        companion_service=companion_service,
         conversation_repo=ConversationRepository(db),
         message_repo=MessageRepository(db),
         media_repo=MediaRepository(db),
@@ -401,6 +410,7 @@ def get_optional_voice_service(
     storage: MediaStorage = Depends(get_media_storage),
     chat_service: ChatService = Depends(get_chat_service),
     chat_routing_service: ChatRoutingService = Depends(get_chat_routing_service),
+    companion_service: CompanionService = Depends(get_companion_service),
 ) -> VoiceService | None:
     """Build synthesis-only support without constructing the full chat pipeline."""
     if not settings.ELEVENLABS_API_KEY:
@@ -413,7 +423,7 @@ def get_optional_voice_service(
     )
     return VoiceService(
         user_repo=UserRepository(db),
-        companion_service=CompanionService(settings),
+        companion_service=companion_service,
         conversation_repo=ConversationRepository(db),
         message_repo=MessageRepository(db),
         media_repo=MediaRepository(db),
@@ -439,10 +449,11 @@ def get_user_data_service(
 def get_backend_context_service(
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
+    companion_service: CompanionService = Depends(get_companion_service),
 ) -> BackendContextService:
     return BackendContextService(
         user_repo=UserRepository(db),
-        companion_service=CompanionService(settings),
+        companion_service=companion_service,
         conversation_repo=ConversationRepository(db),
         settings=settings,
     )
