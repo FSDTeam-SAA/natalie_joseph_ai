@@ -90,8 +90,11 @@ class ImageRequestClassifier:
         # Common Bangla/Banglish request forms put the action after the
         # image noun, unlike English. Keep this explicit and conservative.
         re.compile(
-            r"(?:ছবি|ফটো|সেলফি)[^.!?।]{0,100}"
-            r"(?:পাঠাও|পাঠিয়ে\s+দাও|দেখাও|বানাও|তৈরি\s+করো)",
+            r"(?:\u099b\u09ac\u09bf|\u09ab\u099f\u09cb|\u09b8\u09c7\u09b2\u09ab\u09bf)[^.!"
+            r"?\u0964]{0,100}"
+            r"(?:\u09aa\u09be\u09a0\u09be\u0993|\u09aa\u09be\u09a0\u09bf\u09af\u09bc\u09c7"
+            r"\s+\u09a6\u09be\u0993|\u09a6\u09c7\u0996\u09be\u0993|\u09ac\u09be\u09a8"
+            r"\u09be\u0993|\u09a4\u09c8\u09b0\u09bf\s+\u0995\u09b0\u09cb)",
             re.IGNORECASE,
         ),
         re.compile(
@@ -100,7 +103,9 @@ class ImageRequestClassifier:
             re.IGNORECASE,
         ),
         re.compile(
-            r"(?:কি\s+পরেছ(?:ো)?|আজ\s+কি\s+পরেছ(?:ো)?)[^.!?।]{0,80}দেখাও",
+            r"(?:\u0995\u09bf\s+\u09aa\u09b0\u09c7\u099b(?:\u09cb)?|\u0986\u099c\s+\u0995"
+            r"\u09bf\s+\u09aa\u09b0\u09c7\u099b(?:\u09cb)?)[^.!?\u0964]{0,80}\u09a6\u09c7"
+            r"\u0996\u09be\u0993",
             re.IGNORECASE,
         ),
         re.compile(

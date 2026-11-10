@@ -14,7 +14,8 @@ router = APIRouter(tags=["Companions"])
 
 
 def get_companion_service(settings: Settings = Depends(get_settings)) -> CompanionService:
-    return CompanionService(settings)
+    # FastAPI shares this dependency only within the current request.
+    return CompanionService(settings, cache_profiles=True)
 
 
 @router.get(

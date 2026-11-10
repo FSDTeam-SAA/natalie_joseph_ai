@@ -51,6 +51,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -224,8 +225,11 @@ class MemoryService:
         profile_memories.sort(key=lambda memory: _PROFILE_MEMORY_ORDER.get(memory.key, 99))
         relevant = [f"{memory.key}: {memory.value}" for memory in profile_memories]
         try:
-            embedding_result = await self.embedding_provider.embed_text(
-                query_text, model=self.settings.OPENAI_EMBEDDING_MODEL
+            embedding_result = await asyncio.wait_for(
+                self.embedding_provider.embed_text(
+                    query_text, model=self.settings.OPENAI_EMBEDDING_MODEL
+                ),
+                timeout=self.settings.MEMORY_EMBEDDING_TIMEOUT_SECONDS,
             )
             candidates = await self.memory_repo.search_similar(
                 user_id=user_id,
@@ -234,6 +238,9 @@ class MemoryService:
                 top_k=self.settings.MEMORY_TOP_K,
                 min_confidence=self.settings.MEMORY_MIN_CONFIDENCE,
             )
+        except TimeoutError:
+            logger.info("memory_embedding_timeout", extra={"user_id": str(user_id)})
+            return relevant
         except Exception:  # noqa: BLE001 - retrieval must never break chat
             logger.exception("memory_retrieval_failed", extra={"user_id": str(user_id)})
             return relevant

@@ -58,8 +58,10 @@ def _message_repo(*, existing_user=None, existing_assistant=None):
         "Give me saree wearing look.",
         "Send me a silk saree wearing look.",
         "Send me a picture from your evening.",
-        "তোমার একটা ছবি পাঠাও।",
-        "আমাকে একটা সেলফি দেখাও।",
+        "\u09a4\u09cb\u09ae\u09be\u09b0 \u098f\u0995\u099f\u09be \u099b\u09ac\u09bf "
+        "\u09aa\u09be\u09a0\u09be\u0993\u0964",
+        "\u0986\u09ae\u09be\u0995\u09c7 \u098f\u0995\u099f\u09be \u09b8\u09c7\u09b2"
+        "\u09ab\u09bf \u09a6\u09c7\u0996\u09be\u0993\u0964",
         "Tomar ekta chobi pathao.",
         "Ajke ki porecho dekhao.",
     ],
@@ -80,7 +82,8 @@ def test_classifier_routes_explicit_natural_language_image_requests(message: str
         "I would like to discuss your photo.",
         "I like the saree wearing look.",
         "Describe what you look like.",
-        "ছবি নিয়ে কথা বলি।",
+        "\u099b\u09ac\u09bf \u09a8\u09bf\u09af\u09bc\u09c7 \u0995\u09a5\u09be \u09ac"
+        "\u09b2\u09bf\u0964",
         "Send me a voice note.",
         "What did you do today?",
     ],

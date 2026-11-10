@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -79,9 +80,16 @@ def _sum_usage(usages: list[LLMUsage]) -> LLMUsage:
 
 
 class RoutineResponseGuard:
-    def __init__(self, *, reviewer: LLMProvider, reviewer_model: str) -> None:
+    def __init__(
+        self,
+        *,
+        reviewer: LLMProvider,
+        reviewer_model: str,
+        review_max_output_tokens: int = 512,
+    ) -> None:
         self.reviewer = reviewer
         self.reviewer_model = reviewer_model
+        self.review_max_output_tokens = review_max_output_tokens
 
     async def generate(
         self,
@@ -127,7 +135,9 @@ class RoutineResponseGuard:
             else user_message
         )
         for attempt in range(2):
+            started = time.perf_counter()
             result = await provider.generate(attempt_messages, **kwargs)
+            generation_ms = round((time.perf_counter() - started) * 1000, 2)
             generations.append(result)
             payload = {
                 "routine": routine,
@@ -141,6 +151,7 @@ class RoutineResponseGuard:
                 ][-6:],
             }
             try:
+                started = time.perf_counter()
                 review = await self.reviewer.generate_structured(
                     [
                         LLMMessage(role="system", content=_REVIEW_PROMPT),
@@ -149,6 +160,8 @@ class RoutineResponseGuard:
                     model=self.reviewer_model,
                     schema_name="routine_response_consistency",
                     json_schema=_SCHEMA,
+                    max_output_tokens=self.review_max_output_tokens,
+                    reasoning_effort="low",
                 )
                 verdict = _Verdict.model_validate(review.data)
                 if verdict.consistent != (verdict.reason == "none"):
@@ -170,6 +183,8 @@ class RoutineResponseGuard:
                     "consistent": verdict.consistent,
                     "reason": verdict.reason,
                     "model": review.model,
+                    "generation_ms": generation_ms,
+                    "review_ms": round((time.perf_counter() - started) * 1000, 2),
                     "input_tokens": review.usage.input_tokens,
                     "output_tokens": review.usage.output_tokens,
                     **review.usage.as_metadata(),

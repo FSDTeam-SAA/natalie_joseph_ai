@@ -110,6 +110,8 @@ class LLMProvider(ABC):
         schema_name: str,
         json_schema: dict[str, Any],
         temperature: float | None = None,
+        max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMStructuredResult:
         """
         Structured generation constrained to the given JSON schema.

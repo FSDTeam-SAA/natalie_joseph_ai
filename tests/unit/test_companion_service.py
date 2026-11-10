@@ -171,3 +171,28 @@ def test_optional_bad_routine_does_not_break_the_profile(routine) -> None:
     profile = service._to_profile(dict(LIVE_PROFILE, routine=routine))
     assert profile.name == "Elena"
     assert profile.routine is None
+
+
+async def test_profile_is_fetched_once_per_request_but_refreshed_on_next_request():
+    calls = []
+    profile = dict(LIVE_PROFILE)
+
+    def handle(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"success": True, "data": profile})
+
+    settings = Settings(_env_file=None, COMPANION_CATALOGUE_BASE_URL="https://catalogue.test")
+    transport = httpx.MockTransport(handle)
+    service = CompanionService(settings, transport=transport, cache_profiles=True)
+    companion_id = uuid.UUID(profile["id"])
+    first = await service.get_active_profile(companion_id)
+    assert await service.get_active_profile(companion_id) is first
+    assert len(calls) == 1
+    profile["status"] = False
+    from app.core.exceptions import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        await CompanionService(
+            settings, transport=transport, cache_profiles=True
+        ).get_active_profile(companion_id)
+    assert len(calls) == 2

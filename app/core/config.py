@@ -119,6 +119,9 @@ class Settings(BaseSettings):
     CHAT_MAX_OUTPUT_TOKENS: int = Field(default=350, gt=0, le=8192)
     PROVIDER_TIMEOUT_SECONDS: float = Field(default=45.0, gt=0, le=300)
     PROVIDER_MAX_RETRIES: int = Field(default=2, ge=0, le=10)
+    # Bound optional semantic lookup without dropping durable profile facts.
+    MEMORY_EMBEDDING_TIMEOUT_SECONDS: float = Field(default=1.0, gt=0, le=30)
+    ROUTINE_REVIEW_MAX_OUTPUT_TOKENS: int = Field(default=512, ge=128, le=8192)
 
     # ------------------------------------------------------------------
     # OpenAI — model configuration

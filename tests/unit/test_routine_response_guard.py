@@ -78,6 +78,9 @@ async def test_consistent_reply_keeps_snapshot_and_review_usage_separate():
     assert check["input_tokens"] == 30
     assert result.metadata["routine_validation"]["repaired"] is False
     provider.generate.assert_awaited_once()
+    review_options = reviewer.generate_structured.await_args.kwargs
+    assert review_options["max_output_tokens"] == 512
+    assert review_options["reasoning_effort"] == "low"
 
 
 @pytest.mark.parametrize(

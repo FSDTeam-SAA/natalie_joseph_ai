@@ -122,6 +122,24 @@ class TestOpenAIProviderStructured:
         assert call_kwargs["text"]["format"]["name"] == "memory_extraction"
         assert call_kwargs["text"]["format"]["strict"] is True
 
+    async def test_structured_review_passes_explicit_latency_controls(self) -> None:
+        provider = OpenAIProvider(api_key="sk-fake")
+        with patch.object(
+            provider._client.responses,
+            "create",
+            new=AsyncMock(return_value=_fake_response('{"consistent":true,"reason":"none"}')),
+        ) as create:
+            await provider.generate_structured(
+                [LLMMessage(role="user", content="Check this reply")],
+                model="review-model",
+                schema_name="review",
+                json_schema={"type": "object"},
+                max_output_tokens=512,
+                reasoning_effort="low",
+            )
+        assert create.call_args.kwargs["max_output_tokens"] == 512
+        assert create.call_args.kwargs["reasoning"] == {"effort": "low"}
+
     async def test_generate_structured_raises_on_invalid_json(self) -> None:
         provider = OpenAIProvider(api_key="sk-fake")
         fake_response = _fake_response("not valid json {{{")

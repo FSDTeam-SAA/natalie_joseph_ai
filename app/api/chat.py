@@ -17,7 +17,9 @@ from app.core.exceptions import ServiceUnavailableError, ValidationError
 from app.core.security import AuthContext, get_current_auth_context
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_routing_service import ChatRoutingService, VoiceResponseClassifier
+from app.services.lifestyle_context import apply_lifestyle_context
 from app.services.voice_service import VoiceService
+from app.voice.audio_inspection import inspect_audio_duration
 
 router = APIRouter(tags=["Chat"])
 voice_response_classifier = VoiceResponseClassifier()
@@ -47,6 +49,11 @@ voice_response_classifier = VoiceResponseClassifier()
                             "conversation_id": {"type": "string", "format": "uuid"},
                             "companion_id": {"type": "string", "format": "uuid"},
                             "idempotency_key": {"type": "string", "format": "uuid"},
+                            "context": {
+                                "type": "string",
+                                "description": "Optional lifestyle-v1 JSON context",
+                            },
+                            "request_voice_response": {"type": "boolean", "default": False},
                             "message": {
                                 "type": "string",
                                 "description": "Optional when audio is supplied.",
@@ -82,6 +89,14 @@ async def send_chat_message(
         if audio_value is not None and not isinstance(audio_value, UploadFile):
             raise ValidationError("audio must be a file upload.")
         audio = audio_value
+        voice_mode = form.get("request_voice_response")
+        if voice_mode not in (None, "", "true", "false"):
+            raise ValidationError("request_voice_response must be true or false.")
+        raw_context = form.get("context")
+        if raw_context is not None:
+            if not isinstance(raw_context, str):
+                raise ValidationError("context must be a JSON string.")
+            auth = apply_lifestyle_context(auth, raw_context)
         body = ChatRequest.model_validate(
             {
                 "conversation_id": form.get("conversation_id"),
@@ -93,19 +108,18 @@ async def send_chat_message(
     except PydanticValidationError as exc:
         # These are caller-supplied identifiers and modes, so identifying the
         # invalid fields is safe and makes Swagger/API integrations actionable.
-        fields = ", ".join(
-            str(error["loc"][-1]) for error in exc.errors() if error.get("loc")
-        )
+        fields = ", ".join(str(error["loc"][-1]) for error in exc.errors() if error.get("loc"))
         message = f"Invalid or missing field(s): {fields or 'request body'}."
         raise ValidationError(message) from exc
     except (ValueError, TypeError) as exc:
         raise ValidationError("The request payload is invalid.") from exc
 
+    duration_seconds = None
     if audio is None:
-        if voice_response_classifier.is_voice_request(body.message):
+        if voice_mode == "true" or voice_response_classifier.is_voice_request(body.message):
             if voice_service is None:
                 raise ServiceUnavailableError("ElevenLabs voice processing is not configured.")
-            return await voice_service.process_text(
+            result = await voice_service.process_text(
                 auth,
                 conversation_id=body.conversation_id,
                 companion_id=body.companion_id,
@@ -113,19 +127,34 @@ async def send_chat_message(
                 idempotency_key=body.idempotency_key,
                 background_tasks=background_tasks,
             )
-        return await service.send_message(auth, body, background_tasks)
-
-    if voice_service is None:
-        raise ServiceUnavailableError("ElevenLabs voice processing is not configured.")
-    upload = await read_audio_upload(audio, max_bytes=settings.MAX_AUDIO_UPLOAD_BYTES)
-    return await voice_service.process(
-        auth,
-        conversation_id=body.conversation_id,
-        companion_id=body.companion_id,
-        audio=upload.data,
-        mime_type=upload.mime_type,
-        filename=upload.filename,
-        request_voice_response=True,
-        idempotency_key=body.idempotency_key,
-        background_tasks=background_tasks,
+        else:
+            result = await service.send_message(auth, body, background_tasks)
+    else:
+        if voice_service is None:
+            raise ServiceUnavailableError("ElevenLabs voice processing is not configured.")
+        upload = await read_audio_upload(audio, max_bytes=settings.MAX_AUDIO_UPLOAD_BYTES)
+        result = await voice_service.process(
+            auth,
+            conversation_id=body.conversation_id,
+            companion_id=body.companion_id,
+            audio=upload.data,
+            mime_type=upload.mime_type,
+            filename=upload.filename,
+            request_voice_response=True,
+            idempotency_key=body.idempotency_key,
+            background_tasks=background_tasks,
+        )
+        # VoiceService validates this same payload before provider calls. Using the
+        # encoded input duration keeps billing stable when replaying a request.
+        duration_seconds = inspect_audio_duration(upload.data, upload.mime_type)
+    billing = {}
+    if result.message_type == "audio":
+        billing["voice_characters"] = len(result.response)
+    if duration_seconds is not None:
+        billing["transcription_seconds"] = duration_seconds
+    return result.model_copy(
+        update={
+            "context_version": "lifestyle-v1" if raw_context is not None else None,
+            "billing": billing or None,
+        }
     )

@@ -1,6 +1,4 @@
 # --- Secrets / environment ---------------------------------------------------
-.env
-.env.*
 !.env.example
 *.pem
 *.key
@@ -18,6 +16,7 @@ dist/
 *.egg-info/
 .eggs/
 .venv/
+.python-runtime/
 venv/
 env/
 .pytest_cache/
@@ -29,7 +28,6 @@ htmlcov/
 coverage.xml
 
 # --- IDE -------------------------------------------------------------------------
-.vscode/
 .idea/
 *.swp
 
@@ -45,3 +43,5 @@ storage/media/
 
 # --- Alembic (keep versions, ignore local sqlite if ever used for testing) ------
 *.sqlite3
+config.bat
+node_modules

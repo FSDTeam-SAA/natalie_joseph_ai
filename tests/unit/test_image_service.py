@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ import pytest
 from app.core.config import Settings
 from app.core.exceptions import ProviderError, ValidationError
 from app.core.security import AuthContext
-from app.images.base import ImageGenerationResult
+from app.images.base import ImageGenerationResult, ReferenceImage
 from app.schemas.media import ImageGenerationRequest
 from app.services.image_service import ImageService
 from app.services.routine_service import parse_companion_routine, resolve_current_activity
@@ -348,3 +349,44 @@ async def test_failed_paid_image_attempt_is_not_purchased_again(tmp_path) -> Non
         await service.generate(_auth(), request)
 
     deps.image_provider.generate.assert_not_awaited()
+
+
+async def test_reference_downloads_overlap_and_preserve_configured_order(tmp_path):
+    service, _ = _service(tmp_path)
+    urls = ["https://images.test/first.png", "https://images.test/second.png"]
+    started = []
+    both_started = asyncio.Event()
+
+    async def download(url):
+        started.append(url)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        return ReferenceImage(data=b"png", filename=url, mime_type="image/png")
+
+    service._download_reference_image = AsyncMock(side_effect=download)
+    references = await service._load_reference_images({"reference_images": urls})
+    assert [reference.filename for reference in references] == urls
+    assert len(started) == 2
+
+
+async def test_reusable_generation_excludes_private_history_and_story_context(tmp_path):
+    service, deps = _service(tmp_path)
+    deps.message_repo.get_recent_for_conversation.return_value = [
+        SimpleNamespace(role=SimpleNamespace(value="user"), content="PRIVATE PASSPORT NUMBER")
+    ]
+    current_auth = _auth()
+    from dataclasses import replace
+
+    current_auth = replace(current_auth, raw_claims={"library_reuse": True})
+    await service.generate(
+        current_auth,
+        ImageGenerationRequest(
+            conversation_id=deps.conversation.id,
+            companion_id=deps.companion.id,
+            prompt="Send me a photo of yourself at the gym",
+            idempotency_key=uuid.uuid4(),
+        ),
+    )
+    prompt = deps.image_provider.generate.await_args.kwargs["prompt"]
+    assert "PRIVATE PASSPORT NUMBER" not in prompt

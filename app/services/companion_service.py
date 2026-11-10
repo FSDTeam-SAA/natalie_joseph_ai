@@ -39,10 +39,17 @@ class CompanionProfile:
 
 class CompanionService:
     def __init__(
-        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        settings: Settings,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        cache_profiles: bool = False,
     ) -> None:
         self.settings = settings
         self.transport = transport
+        self.cache_profiles = cache_profiles
+        # Request-scoped only: admin edits are visible on the next request.
+        self._profiles: dict[uuid.UUID, CompanionProfile] = {}
 
     @staticmethod
     def _slug(profile: dict) -> str:
@@ -246,6 +253,8 @@ class CompanionService:
             raise ProviderError("The companion catalogue returned invalid data.") from exc
 
     async def get_active_profile(self, companion_id: uuid.UUID) -> CompanionProfile:
+        if self.cache_profiles and companion_id in self._profiles:
+            return self._profiles[companion_id]
         payload = await self._get(f"companions/{companion_id}")
         profile = payload.get("data")
         if not isinstance(profile, dict):
@@ -253,6 +262,8 @@ class CompanionService:
         companion = self._to_profile(profile)
         if not companion.active:
             raise NotFoundError(f"Companion {companion_id} is inactive.")
+        if self.cache_profiles:
+            self._profiles[companion_id] = companion
         return companion
 
     async def get_active_profile_by_reference(self, reference: str) -> CompanionProfile:

@@ -138,6 +138,8 @@ class OpenAIProvider(LLMProvider):
         schema_name: str,
         json_schema: dict[str, Any],
         temperature: float | None = None,
+        max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMStructuredResult:
         try:
             kwargs: dict[str, Any] = {
@@ -154,6 +156,11 @@ class OpenAIProvider(LLMProvider):
             }
             if temperature is not None:
                 kwargs["temperature"] = temperature
+
+            if max_output_tokens is not None:
+                kwargs["max_output_tokens"] = max_output_tokens
+            if reasoning_effort is not None:
+                kwargs["reasoning"] = {"effort": reasoning_effort}
 
             response = await self._client.responses.create(**kwargs)
         except APIError as exc:
