@@ -15,7 +15,7 @@ from fastapi import BackgroundTasks
 from app.core.config import Settings
 from app.core.exceptions import ProviderError
 from app.core.security import AuthContext
-from app.db.models.message import MessageRole, MessageType
+from app.db.models.message import Message, MessageRole, MessageType
 from app.llm.base import LLMResult, LLMStructuredResult, LLMUsage
 from app.llm.prompts.builder import PromptBuilder
 from app.schemas.chat import ChatRequest
@@ -54,16 +54,17 @@ def _service(monkeypatch, name="Chloé", timezone="Europe/London"):
     )
     persisted = []
 
-    async def refresh(message):
-        message.id = uuid.uuid4()
-        message.created_at = _NOW
-        # Simulate the column default normally populated by a database flush.
-        if message.message_type is None:
-            message.message_type = MessageType.text
+    async def commit():
+        for message in persisted:
+            if isinstance(message, Message) and message.id is None:
+                message.id = uuid.uuid4()
+                message.created_at = _NOW
+                if message.message_type is None:
+                    message.message_type = MessageType.text
 
     messages = SimpleNamespace(
         session=SimpleNamespace(
-            add=persisted.append, commit=AsyncMock(), refresh=AsyncMock(side_effect=refresh)
+            add=persisted.append, commit=AsyncMock(side_effect=commit)
         ),
         acquire_idempotency_lock=AsyncMock(),
         get_user_by_request_id=AsyncMock(return_value=None),

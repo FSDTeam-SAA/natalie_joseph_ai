@@ -1,4 +1,6 @@
 # --- Secrets / environment ---------------------------------------------------
+.env
+.env.*
 !.env.example
 *.pem
 *.key
@@ -28,6 +30,7 @@ htmlcov/
 coverage.xml
 
 # --- IDE -------------------------------------------------------------------------
+.vscode/
 .idea/
 *.swp
 
@@ -43,5 +46,3 @@ storage/media/
 
 # --- Alembic (keep versions, ignore local sqlite if ever used for testing) ------
 *.sqlite3
-config.bat
-node_modules
