@@ -95,8 +95,8 @@ def get_chat_llm_provider(settings: Settings = Depends(get_settings)) -> LLMProv
         settings.XAI_BASE_URL,
         settings.OPENAI_API_KEY,
         settings.OPENAI_CHAT_MODEL,
-        settings.PROVIDER_TIMEOUT_SECONDS,
-        settings.PROVIDER_MAX_RETRIES,
+        min(settings.PROVIDER_TIMEOUT_SECONDS, settings.CHAT_PROVIDER_TIMEOUT_SECONDS),
+        0,  # Fail over promptly instead of retrying the primary in the SDK.
     )
 
 
